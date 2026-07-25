@@ -10,3 +10,4 @@ venv/
 *.csv
 *.md.out
 .streamlit/secrets.toml
+*.bak
