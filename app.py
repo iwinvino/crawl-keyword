@@ -3,6 +3,8 @@
 Bố cục: mỗi tính năng 1 TAB trên cùng + tab ⚙️ Cài đặt (quản lý key / Service Account).
 Cấu hình của từng tính năng nằm ngay trong tab của nó — KHÔNG dùng sidebar.
 """
+import os
+import re
 from datetime import datetime
 
 import streamlit as st
@@ -20,13 +22,46 @@ from providers import SerperProvider
 
 st.set_page_config(page_title="SEO iGaming Toolkit", page_icon="🎰", layout="wide")
 
-# ---------------- Quản lý API key (lưu lâu dài) ----------------
+
+def get_secret(name: str):
+    """Đọc biến cấu hình khi deploy web: biến môi trường -> st.secrets -> None."""
+    v = os.environ.get(name)
+    if v:
+        return v
+    try:
+        return st.secrets[name]
+    except Exception:
+        return None
+
+
+# ---------------- Khóa mật khẩu truy cập (deploy web) ----------------
+# Đặt APP_PASSWORD trong Secrets để chặn người lạ. Bỏ trống = không khóa (chạy local).
+_app_pw = get_secret("APP_PASSWORD")
+if _app_pw and not st.session_state.get("auth_ok"):
+    st.title("🎰 SEO iGaming Toolkit")
+    st.text_input("🔒 Mật khẩu truy cập", type="password", key="pw_in")
+    if st.button("Đăng nhập", type="primary"):
+        if st.session_state.get("pw_in") == str(_app_pw):
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Sai mật khẩu.")
+    st.stop()
+
+
+# ---------------- Quản lý API key (lưu lâu dài + key chung qua Secrets) ----------------
 if "keys" not in st.session_state:
     loaded = key_store.load_keys()
-    if not loaded and settings.serper_api_keys:   # lần đầu: nạp từ .env vào store
-        loaded = [{"label": "từ .env", "key": k, "dead": False, "status": "chưa test"}
-                  for k in settings.serper_api_keys]
-        key_store.save_keys(loaded)
+    if not loaded:  # lần đầu / server mới: nạp key CHUNG từ .env hoặc Secrets
+        seed = list(settings.serper_api_keys)
+        if not seed:
+            raw = get_secret("SERPER_API_KEY")
+            if raw:
+                seed = [k.strip() for k in re.split(r"[,;\n\r]+", str(raw)) if k.strip()]
+        if seed:
+            loaded = [{"label": "key chung", "key": k, "dead": False, "status": "chưa test"}
+                      for k in seed]
+            key_store.save_keys(loaded)
     st.session_state["keys"] = loaded
 
 
