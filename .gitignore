@@ -1,0 +1,12 @@
+.env
+keys.json
+service_accounts.json
+.cache/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.xlsx
+*.csv
+*.md.out
+.streamlit/secrets.toml
