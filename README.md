@@ -140,6 +140,8 @@ Bật **🔗 Đếm & liệt kê link stacking / bio-about mà trang trỏ ra** 
 - **Cùng domain đã khai báo nhưng khác handle** — vd bạn khai `x.com/HITCLUBDTAC` mà trang trỏ tới `x.com/ZachMoonshine` → cũng loại, vì đó là tài khoản người khác.
 - Quảng cáo, iframe/js nhúng, `mailto:` `tel:` `javascript:`, file CSS/JS/ảnh.
 
+**Nhận diện root domain:** `blog.site.com` và `site.com` là **cùng** site; nhưng TLD 2 cấp thì giữ nguyên nên `school2-aksay.org.ru` ≠ `other.org.ru`, `abc.com.pl` ≠ `xyz.com.pl` (danh sách `_TWO_LEVEL_TLD` trong [link_extractor.py](link_extractor.py) — thiếu thì thêm 1 dòng).
+
 *Handle* được lấy tự động từ URL bạn nhập (nhãn subdomain + các đoạn đường dẫn + giá trị query), bỏ các từ chung chung (`user`, `users`, `profile`, `forum`, `about`, `page`...) và token ngắn dưới 5 ký tự. Chuẩn hoá bỏ dấu gạch nên `hitclub-dtac` = `hitclub_dtac` = `hitclub.dtac` = `hitclubdtac`.
 
 **Ví dụ thực tế** (danh sách nhập = file test `example/sample.txt` ở máy, domain của bạn = `hitclubdtac.com`):
@@ -150,11 +152,25 @@ Bật **🔗 Đếm & liệt kê link stacking / bio-about mà trang trỏ ra** 
 | `metaldevastationradio.com/hitclubdtac` | **1 link hợp lệ** = 🎯 `hitclubdtac.com` · loại 8 link social/nền tảng của chủ site |
 | `www.fw-follow.com/forum/topic/.../hitclubdtac` | **1 link hợp lệ** · loại `line.me`, `makewebeasy.com` |
 
-**URL dạng chữ** (không click được) và **URL chỉ nằm trong JSON/JS/meta** (trang render bằng JS như Pinterest, Tumblr, Gumroad) cũng chỉ liệt kê khi khớp khai báo, kèm nhãn riêng `📄 text thường` / `📦 ẩn trong JSON/JS` và **không tính là backlink** — dùng để biết link *có tồn tại* nhưng cần mở trình duyệt xác nhận.
+**Bắt được cả link mà HTML thô không có sẵn** — 3 trường hợp hay làm tool khác báo "không có link":
 
-**Các cột thêm vào bảng kết quả:** `Link stacking/bio` (số link hợp lệ) · `Trong bio/about` · `Trong nội dung` · `Domain đích` · `Dofollow` / `Nofollow` · `Khớp URL đang check` · `Khớp URL/biến thể` · `URL dạng text (không click)` · `Ẩn trong JSON/JS` · `Bỏ: nội bộ` · `Bỏ: không khai báo` · `Link về bạn`.
+| Trường hợp | Ví dụ thật | Tool xử lý |
+|---|---|---|
+| Thẻ `<a>` bị nhồi trong **JSON khởi tạo**, ký tự bị escape (`\u003Ca href=\"...`) | Chess.com (mục overview), Ameba Ownd (`*.shopinfo.jp`), Gumroad | Giải mã escape `\uXXXX` `\/` `\"` rồi đọc cả `rel` → nhãn `🔗 thẻ a trong JSON/JS`, biết luôn dofollow/nofollow |
+| Chỉ ghi **tên domain trần**, không có `https://` | Vimeo bio: `Website: //sunwindtac.com/` | Dò trực tiếp domain đã khai báo (không quét bừa) → nhãn `📦 ẩn trong JSON/JS` hoặc `📝 trong meta/description` |
+| Link **bọc qua trang trung gian** của chính site | `chess.com/away?url=...`, `l.facebook.com/l.php?u=...`, `pdc.edu/?URL=...`, `.../jump.php?url=...` | Bóc tham số `url/u/redirect/target/goto...` lấy đích thật → nhãn `🔀 thẻ a qua trang trung gian`, cột **Qua trung gian** ghi URL bọc. Không bóc thì link này bị tính là "nội bộ" và mất backlink |
 
-**Ô 🎯 Domain của bạn:** mọi cách viết đều **như nhau** — `https://a.com/`, `www.a.com`, `a.com`, `A.COM:443/abc?x=1` → đều hiểu là `a.com`; subdomain (`blog.a.com`) cũng khớp. Cột **Link về bạn** báo ngay:
+Ô số **Thẻ a trong JSON/JS** đếm riêng nhóm thẻ `<a>` nằm trong JSON (Google render JS nên thường vẫn thấy — nhưng nên mở trình duyệt xác nhận); ô **Text / chỉ trong mã** đếm phần chỉ là chữ hoặc chỉ xuất hiện trong mã, **không** truyền giá trị SEO.
+
+**Kiểm chứng:** `chess.com/member/sunwindtac` khai báo đủ 34 URL → tool ra **đúng 34** (33 URL ngoài + 1 domain chính; bỏ đúng URL của chính trang đó vì là nội bộ). `sunwindtac.shopinfo.jp` khai báo 40 URL → ra **41/41**.
+
+**Vẫn có giới hạn thật:** trang render **hoàn toàn** bằng JS mà HTML không chứa dữ liệu (Twitch, 500px) thì đọc HTTP thuần không thấy gì; domain bị nhà mạng **reset kết nối** (vd `disqus.com` ở VN — thử curl_cffi 5 profile + requests đều bị reset) thì báo `⚠️ lỗi` kèm ghi chú *"nhiều khả năng ISP chặn, KHÔNG phải trang chết"*. Cả hai đều nói rõ ở cột **Ghi chú**, không im lặng trả 0.
+
+**Cột `Link về bạn` nằm ngay sau `Trạng thái`**: hiện **đúng URL** trỏ về domain của bạn, hoặc **`x`** nếu không có. Link không phải thẻ `<a>` trong HTML thô thì có tiền tố: `⚙️` (thẻ a trong JSON/JS) · `📄` (chỉ là chữ) · `📦` (chỉ trong JSON/JS); nhiều link thì ghi thêm `+n`.
+
+**Các cột thêm vào bảng kết quả:** `Link stacking/bio` (số link hợp lệ) · `Trong bio/about` · `Trong nội dung` · `Domain đích` · `Dofollow` / `Nofollow` · `Khớp URL đang check` · `Khớp URL/biến thể` · `URL dạng text (không click)` · `Ẩn trong JSON/JS` · `Thẻ a trong JSON/JS` · `Bỏ: nội bộ` · `Bỏ: không khai báo` · `Ghi chú link về bạn`.
+
+**Ô 🎯 Domain của bạn:** mọi cách viết đều **như nhau** — `https://a.com/`, `www.a.com`, `a.com`, `A.COM:443/abc?x=1` → đều hiểu là `a.com`; subdomain (`blog.a.com`) cũng khớp. Cột **Ghi chú link về bạn** mô tả chi tiết:
 - `✅ 2 link (1 dofollow)` — backlink đã lên thật.
 - `⚠️ chỉ ở dạng text/không click được` — site chỉ in URL ra chữ → **không tính là backlink**.
 - `⚠️ chỉ thấy trong JSON/JS/meta` — trang render bằng JS, cần mở trình duyệt xác nhận.
@@ -170,6 +186,8 @@ Bảng này cũng xuất thành sheet Excel **Link theo trang nguồn**, nên "0
 **Lọc trùng chỉ trong PHẠM VI 1 TRANG NGUỒN:** cùng 1 URL đích xuất hiện trên 5 trang nguồn khác nhau = **5 dòng**. Cột `Số lần` là số lần URL đó lặp *trong chính trang đó* (2 thẻ `<a>` cùng đích trên cùng 1 trang = 1 dòng, `Số lần = 2`).
 
 **Tab 🔗 Link trỏ ra** liệt kê từng link kèm **Anchor text**, **Follow** (dofollow / nofollow / ugc / sponsored), **Vị trí** (bio/profile · nội dung · footer · menu...), **Số lần**, cột **Đích** + bộ lọc nhanh (Tất cả · 🎯 domain của bạn · 🔁 khớp đúng URL · Trong bio/about · 📄 Text / 📦 ẩn JSON-JS) và ô tìm theo chuỗi. Kèm bảng **🌐 Gom theo domain đích**.
+
+**Trang nguồn không có link nào vẫn được liệt kê:** trong bảng chi tiết, mỗi trang không tìm được link hợp lệ vẫn có **1 dòng** (STT + trang nguồn, các cột còn lại trống/0, cột **Đích** ghi lý do) và được **tô vàng** — 1 màu duy nhất, dùng `rgba` nên đọc được cả theme sáng và tối.
 
 **Giới hạn 10 link/trang trên giao diện:** nếu 1 trang có hơn 10 link hợp lệ, bảng chỉ hiện **10 link đầu**, kèm dòng đếm **số lượng thật** (vd `gamblingtherapy.org/... = 20`). Tích ô **📤 Xuất đầy đủ tất cả N link ra file** rồi tải Excel/CSV để lấy trọn danh sách; mặc định file tải về cũng chỉ 10 link/trang.
 

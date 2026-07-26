@@ -7,6 +7,7 @@ import os
 import re
 from datetime import datetime
 
+import pandas as pd
 import streamlit as st
 
 import exporters
@@ -700,12 +701,37 @@ with tab_url:
         my_doms = st.session_state.get("url_my_domains_ran", [])
         UI_LINKS_PER_PAGE = 10   # giao diện chỉ hiện 10 link đầu mỗi trang
 
+        def _my_link_cell(r):
+            """URL thật trỏ về domain của bạn, hoặc 'x' nếu không có.
+
+            Ghi rõ khi link không phải thẻ <a> trong HTML thô (chỉ text, hoặc chỉ
+            hiện sau khi JS render) — vẫn là link nhưng cần mở trình duyệt xác nhận.
+            """
+            found = [l for l in (r.get("outbound") or []) if l.get("mine")]
+            if not found:
+                return "x"
+            _rank = {"ra ngoài": 0, "thẻ a trong JSON/JS": 1}
+            found.sort(key=lambda l: _rank.get(l["loai"], 2))
+            best = found[0]
+            extra = f" +{len(found) - 1}" if len(found) > 1 else ""
+            if best["loai"] == "ra ngoài":
+                return f"{best['url']}{extra}"
+            if best["loai"] == "thẻ a trong JSON/JS":
+                return f"⚙️ {best['url']} (thẻ a trong JSON/JS){extra}"
+            if best["loai"].startswith("text"):
+                return f"📄 {best['url']} (chỉ là chữ){extra}"
+            return f"📦 {best['url']} (chỉ trong JSON/JS){extra}"
+
         def _row_display(r):
             d = {
                 "STT": r["stt"],
                 "URL": r["url"],
                 "Domain": r["domain"],
                 "Trạng thái": _emoji.get(r["category"], r["category"]),
+            }
+            if scanned and my_doms:      # đặt ngay sau Trạng thái theo yêu cầu
+                d["Link về bạn"] = _my_link_cell(r)
+            d.update({
                 # Để dạng chuỗi cho cả cột (dòng ⏭️ bỏ qua không có mã) — tránh
                 # cột lẫn số với rỗng khiến bảng phải tự chuyển kiểu.
                 "Mã HTTP": str(r["status_code"]) if r["status_code"] else "",
@@ -713,7 +739,7 @@ with tab_url:
                 "Content-Type": r["content_type"],
                 "Redirect": _redir_label(r),
                 "Anchor": _anchor_label.get(r.get("anchor_ok"), "") if r.get("anchor") else "",
-            }
+            })
             if scanned:
                 d["Link stacking/bio"] = r.get("links_external", 0)
                 d["Trong bio/about"] = r.get("links_bio", 0)
@@ -725,10 +751,11 @@ with tab_url:
                 d["Khớp URL/biến thể"] = r.get("links_to_checked", 0)
                 d["URL dạng text (không click)"] = r.get("links_text_only", 0)
                 d["Ẩn trong JSON/JS"] = r.get("links_embedded", 0)
+                d["Thẻ a trong JSON/JS"] = r.get("links_embedded_anchor", 0)
                 d["Bỏ: nội bộ"] = r.get("drop_internal", 0)
                 d["Bỏ: không khai báo"] = r.get("drop_undeclared", 0)
                 if my_doms:
-                    d["Link về bạn"] = r.get("my_links_note", "") or "—"
+                    d["Ghi chú link về bạn"] = r.get("my_links_note", "") or "—"
             d["URL cuối / Ghi chú"] = r["note"] or (r["final_url"] if r["redirected"] else "")
             return d
 
@@ -738,26 +765,6 @@ with tab_url:
         # Lọc trùng CHỈ trong phạm vi 1 trang nguồn — cùng 1 URL đích xuất hiện ở
         # nhiều trang nguồn khác nhau thì vẫn là nhiều dòng (cột "Số lần" là số lần
         # lặp trong CHÍNH trang đó).
-        link_rows = []
-        for r in rows:
-            for lk in (r.get("outbound") or []):
-                link_rows.append({
-                    "STT trang": r["stt"],
-                    "Trang nguồn": r["url"],
-                    "Link đích": lk["url"],
-                    "Domain đích": lk["domain"],
-                    "Loại": lk["loai"],
-                    "Anchor text": lk["anchor"],
-                    "Follow": lk["follow"],
-                    "Kiểu": lk["kind"],
-                    "Vị trí": lk["zone"],
-                    "Số lần": lk["count"],
-                    "rel": lk["rel"],
-                    "Đích": url_checker.link_extractor.MATCH_LABEL.get(
-                        lk.get("match", ""), ""),
-                })
-        cut = sum(r.get("links_truncated", 0) or 0 for r in rows)
-
         # Thống kê THEO TỪNG TRANG NGUỒN — mọi URL đã nhập đều có 1 dòng, kể cả
         # trang 0 link / không quét được, kèm lý do để không hiểu nhầm là "sạch".
         def _page_note(r):
@@ -778,6 +785,40 @@ with tab_url:
                 return "✅ đã quét (có thêm link chỉ nằm trong JSON/JS)"
             return "✅ đã quét"
 
+        NO_LINK = "(không có link)"      # nhãn dòng trang nguồn trắng tay
+        link_rows = []
+        for r in rows:
+            found = r.get("outbound") or []
+            for lk in found:
+                link_rows.append({
+                    "STT trang": r["stt"],
+                    "Trang nguồn": r["url"],
+                    "Link đích": lk["url"],
+                    "Domain đích": lk["domain"],
+                    "Loại": lk["loai"],
+                    "Anchor text": lk["anchor"],
+                    "Follow": lk["follow"],
+                    "Kiểu": lk["kind"],
+                    "Vị trí": lk["zone"],
+                    "Số lần": lk["count"],
+                    "rel": lk["rel"],
+                    "Qua trung gian": lk.get("via", ""),
+                    "Đích": url_checker.link_extractor.MATCH_LABEL.get(
+                        lk.get("match", ""), ""),
+                })
+            if scanned and not found:
+                # Trang nguồn KHÔNG có link nào khớp khai báo -> vẫn phải có 1 dòng
+                # để không bị lọt khỏi danh sách; giao diện tô màu để nhận ra ngay.
+                link_rows.append({
+                    "STT trang": r["stt"],
+                    "Trang nguồn": r["url"],
+                    "Link đích": "", "Domain đích": "", "Loại": NO_LINK,
+                    "Anchor text": "", "Follow": "", "Kiểu": "",
+                    "Vị trí": "", "Số lần": 0, "rel": "", "Qua trung gian": "",
+                    "Đích": _page_note(r),
+                })
+        cut = sum(r.get("links_truncated", 0) or 0 for r in rows)
+
         page_stat_rows = [{
             "STT": r["stt"],
             "Trang nguồn": r["url"],
@@ -792,11 +833,25 @@ with tab_url:
             "Khớp URL/biến thể": r.get("links_to_checked", 0),
             "URL dạng text": r.get("links_text_only", 0),
             "Ẩn trong JSON/JS": r.get("links_embedded", 0),
+            "Thẻ a trong JSON/JS": r.get("links_embedded_anchor", 0),
             "Link về bạn": r.get("my_links_note", "") or "—",
             "Bỏ: nội bộ": r.get("drop_internal", 0),
             "Bỏ: không khai báo": r.get("drop_undeclared", 0),
             "Ghi chú": _page_note(r),
         } for r in rows] if scanned else []
+
+        # Một màu duy nhất để đánh dấu dòng "trang nguồn không có link".
+        # rgba nên đọc được cả theme sáng và tối.
+        _NO_LINK_BG = "background-color: rgba(255, 193, 7, 0.28)"
+
+        def _style_links(items):
+            """Trả về Styler tô vàng các dòng trang nguồn không có link nào."""
+            df = pd.DataFrame(items)
+            if df.empty or "Loại" not in df.columns:
+                return df
+            return df.style.apply(
+                lambda row: [_NO_LINK_BG if row["Loại"] == NO_LINK else ""] * len(row),
+                axis=1)
 
         def _cap_per_page(items, limit=UI_LINKS_PER_PAGE):
             """Giữ tối đa `limit` link đầu MỖI trang nguồn (yêu cầu: UI chỉ hiện 10)."""
@@ -834,23 +889,31 @@ with tab_url:
             mine_pages = [r for r in rows if (r.get("my_links", 0) or 0) > 0]
             drop_undecl = sum(r.get("drop_undeclared", 0) or 0 for r in rows)
             drop_inner = sum(r.get("drop_internal", 0) or 0 for r in rows)
+            json_links = [l for l in link_rows if l["Loại"] == "thẻ a trong JSON/JS"]
+            code_links = [l for l in link_rows if l["Loại"].startswith("ẩn")]
             st.markdown("**🔗 Link stacking / bio-about — chỉ link ĐÃ KHAI BÁO**")
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("Link hợp lệ", len(ext_links),
-                      help="Thẻ <a> trỏ ra ngoài mà đích đến KHỚP KHAI BÁO: domain của "
-                           "bạn, hoặc URL trong danh sách đang check (kể cả biến thể "
-                           "cùng domain + cùng handle). Đã gộp trùng theo từng trang.")
-            k2.metric("Domain đích khác nhau",
-                      len({l["Domain đích"] for l in ext_links if l["Domain đích"]}))
-            k3.metric("Dofollow", sum(1 for l in ext_links if l["Follow"] == "dofollow"))
-            k4.metric("Nofollow/UGC", sum(1 for l in ext_links if l["Follow"] != "dofollow"))
-            k5.metric("URL dạng text / ẩn JS",
-                      len(text_links) + len([l for l in link_rows
-                                             if l["Loại"].startswith("ẩn")]),
-                      help="URL viết thành chữ hoặc chỉ nằm trong JSON/JS/meta → "
-                           "KHÔNG phải link, không truyền giá trị SEO. Với trang render "
-                           "bằng JS (Pinterest, Tumblr, Twitch...) đây là dấu hiệu link "
-                           "có tồn tại nhưng cần mở trình duyệt để xác nhận.")
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("Link hợp lệ (HTML)", len(ext_links),
+                      help="Thẻ <a> có ngay trong HTML, trỏ ra ngoài, và đích đến KHỚP "
+                           "KHAI BÁO: domain của bạn hoặc URL trong danh sách đang check "
+                           "(kể cả biến thể cùng domain + cùng handle). Gộp trùng theo trang.")
+            k2.metric("Thẻ a trong JSON/JS", len(json_links),
+                      help="Là thẻ <a href> thật nhưng nằm trong JSON khởi tạo, chỉ hiện "
+                           "sau khi JS render (Chess.com, Ameba Ownd/shopinfo.jp, "
+                           "Gumroad...). Google render JS nên thường vẫn thấy — tool đã "
+                           "đọc được cả rel để biết dofollow/nofollow. Nên mở trình duyệt "
+                           "xác nhận.")
+            k3.metric("Domain đích khác nhau",
+                      len({l["Domain đích"] for l in ext_links + json_links
+                           if l["Domain đích"]}))
+            k4.metric("Dofollow", sum(1 for l in ext_links + json_links
+                                      if l["Follow"] == "dofollow"))
+            k5.metric("Nofollow/UGC", sum(1 for l in ext_links + json_links
+                                          if l["Follow"] not in ("dofollow", "")))
+            k6.metric("Text / chỉ trong mã", len(text_links) + len(code_links),
+                      help="URL viết thành chữ, hoặc chỉ xuất hiện trong JSON/JS/meta mà "
+                           "KHÔNG phải thẻ <a> → không truyền giá trị SEO. Là dấu hiệu "
+                           "link có tồn tại nhưng cần mở trình duyệt xác nhận.")
             no_scan = [r for r in rows if r["category"] != "sống"
                        or not r.get("links_total")]
             if no_scan:
@@ -996,14 +1059,18 @@ with tab_url:
 
                     capped = _cap_per_page(shown)
                     hidden = len(shown) - len(capped)
-                    st.caption(f"Đang hiện **{len(capped)}** / {len(shown)} link "
+                    n_nolink = sum(1 for l in capped if l["Loại"] == NO_LINK)
+                    st.caption(f"Đang hiện **{len(capped)}** / {len(shown)} dòng "
                                f"(tổng {len(link_rows)}). Giao diện chỉ hiện "
                                f"{UI_LINKS_PER_PAGE} link đầu mỗi trang nguồn" +
                                (f" — còn **{hidden}** link nữa, tích ô "
                                 f"*📤 Xuất đầy đủ* ở trên rồi tải Excel/CSV để xem hết."
-                                if hidden else "."))
-                    st.dataframe(capped, use_container_width=True, height=480,
-                                 hide_index=True)
+                                if hidden else ".") +
+                               (f" 🟡 **{n_nolink}** dòng tô vàng = trang nguồn "
+                                f"**không có link nào** khớp khai báo (cột *Đích* ghi "
+                                f"lý do)." if n_nolink else ""))
+                    st.dataframe(_style_links(capped), use_container_width=True,
+                                 height=480, hide_index=True)
                     per_page = {}
                     for l in shown:
                         per_page[l["Trang nguồn"]] = per_page.get(l["Trang nguồn"], 0) + 1

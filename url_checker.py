@@ -403,6 +403,7 @@ class UrlResult:
     links_content: int = 0      # nằm trong nội dung
     links_text_only: int = 0    # URL viết dạng chữ, KHÔNG click được
     links_embedded: int = 0     # link của bạn nhồi trong JSON/JS/meta (trang SPA)
+    links_embedded_anchor: int = 0  # trong đó là thẻ <a> thật (hiện sau khi JS render)
     links_to_checked: int = 0   # link khớp URL đang check (kể cả biến thể)
     links_checked_exact: int = 0  # khớp đúng 1 URL trong danh sách đang check
     drop_internal: int = 0      # đã bỏ: link nội bộ cùng domain
@@ -642,6 +643,7 @@ def _link_fields(body: str, base_url: str, declared, max_links: int) -> dict:
         links_ext_domains=s["external_domains"], links_dofollow=s["dofollow"],
         links_nofollow=s["nofollow"], links_bio=s["bio"], links_content=s["content"],
         links_text_only=s["text_only"], links_embedded=s["embedded"],
+        links_embedded_anchor=s["embedded_anchor"],
         links_to_checked=s["to_checked"], links_checked_exact=s["checked_exact"],
         drop_internal=s["dropped_internal"],
         drop_undeclared=s["dropped_undeclared"], drop_kind=s["dropped_kind"],
@@ -704,6 +706,13 @@ def check_one(stt: int, line: str, timeout: int = 20, anti_bot: bool = True,
                 meta_refresh=meta_hit, anchor=fragment)
 
     if status == 0:
+        # Reset kết nối ở MỌI engine = chặn tầng mạng (ISP/nhà mạng chặn domain đó,
+        # vd disqus.com ở VN). KHÔNG phải trang chết -> nói rõ để khỏi hiểu nhầm.
+        if re.search(r"connection was reset|connection aborted|connectionreset|"
+                     r"reset by peer|recv failure", err, re.I):
+            err = ("kết nối bị reset ở mọi engine — nhiều khả năng nhà mạng/ISP chặn "
+                   "domain này, KHÔNG phải trang chết. Mở bằng trình duyệt hoặc VPN "
+                   "để kiểm tra.")
         return UrlResult(stt, line, url, domain, True, False, "lỗi", 0,
                          **base, note=err)
     if 200 <= status < 300:

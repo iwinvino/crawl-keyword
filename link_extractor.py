@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 import warnings
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse
 
 try:
     from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -51,6 +51,13 @@ _TWO_LEVEL_TLD = {
     "co.kr", "com.br", "com.mx", "com.ar", "com.co", "com.pe", "co.in", "com.cn",
     "com.tw", "com.hk", "com.sg", "com.my", "co.th", "com.ph", "co.id", "com.tr",
     "co.za", "co.nz", "com.ua", "co.il", "com.pk", "com.bd", "com.ng", "com.eg",
+    "org.ru", "com.ru", "net.ru", "pp.ru", "spb.ru", "msk.ru", "co.ua", "in.ua",
+    "pp.ua", "kiev.ua", "com.pl", "net.pl", "org.pl", "com.ro", "com.gr", "or.kr",
+    "ne.kr", "ac.in", "net.in", "org.in", "co.ke", "co.tz", "com.gh", "com.uy",
+    "com.ec", "com.py", "com.bo", "com.do", "com.gt", "com.pa", "com.cy", "co.at",
+    "or.at", "co.hu", "com.hr", "org.il", "ac.il", "co.ma", "com.qa", "com.sa",
+    "com.kw", "com.lb", "com.jo", "com.om", "com.bh", "org.tw", "gov.tw", "org.br",
+    "net.br", "com.tn", "com.dz", "com.ly", "org.au", "id.au", "net.nz", "org.nz",
 }
 
 # Vị trí link trên trang (chỉ để THÔNG TIN, không dùng để loại link nữa)
@@ -72,8 +79,16 @@ _ZONE_DEFAULT = "nội dung"
 
 _KIND_LABEL = {"a": "🔗 thẻ a", "area": "🗺️ area",
                "text": "📄 text thường (không click)",
+               "wrap": "🔀 thẻ a qua trang trung gian",
+               "embed_a": "🔗 thẻ a trong JSON/JS (hiện sau khi JS render)",
                "embed": "📦 ẩn trong JSON/JS (cần JS mới hiện)",
                "meta": "📝 trong meta/description (không click)"}
+
+# ---- Link trung gian: href trỏ về chính site rồi mới nhảy sang đích thật ----
+# vd chess.com/away?url=... · l.facebook.com/l.php?u=... · pdc.edu/?URL=...
+_WRAP_PARAMS = ("url", "u", "uri", "target", "redirect", "redirect_url", "redirecturl",
+                "to", "dest", "destination", "link", "out", "outurl", "goto", "next",
+                "continue", "jump", "return", "site", "web")
 
 MATCH_LABEL = {
     "mine": "🎯 domain của bạn",
@@ -230,6 +245,66 @@ def _clean(text: str, limit: int = 120) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
 
 
+def unwrap_url(url: str) -> str:
+    """Bóc URL đích thật từ link trung gian, rỗng nếu không phải link trung gian.
+
+    Rất nhiều site không cho trỏ thẳng ra ngoài mà bọc qua trang chuyển tiếp của
+    chính họ: `chess.com/away?url=https%3A%2F%2Fdich.com`,
+    `l.facebook.com/l.php?u=...`, `pdc.edu/?URL=...`, `.../jump.php?url=...`.
+    Nếu không bóc, link đó bị tính là "nội bộ" và mất luôn backlink thật.
+    """
+    if not url:
+        return ""
+    try:
+        p = urlparse(url)
+        for key, val in parse_qsl(p.query, keep_blank_values=False):
+            if key.lower() not in _WRAP_PARAMS:
+                continue
+            cand = unquote(val).strip()
+            if re.match(r"^https?://", cand, re.I) and _bare_host(cand):
+                return cand
+        # Dạng nhét thẳng vào đường dẫn: /redirect/https://dich.com/...
+        m = re.search(r"(https?(?::|%3A)(?://|%2F%2F).+)$", p.path or "", re.I)
+        if m:
+            cand = unquote(m.group(1)).strip()
+            if re.match(r"^https?://", cand, re.I) and _bare_host(cand):
+                return cand
+    except Exception:
+        pass
+    return ""
+
+
+def _decode_escapes(html: str) -> str:
+    """Giải mã HTML/JSON escape để thấy được URL bị "che" trong JSON khởi tạo.
+
+    Trang render bằng JS thường nhồi cả khối HTML bio vào JSON, ở đó dấu `/` thành
+    `\\/` hoặc `\\u002F`, `<` thành `\\u003C`... nên regex URL thường không khớp.
+    Chess.com, Ameba Ownd (shopinfo.jp), Gumroad... đều thuộc dạng này.
+    """
+    s = ((html or "").replace("\\/", "/").replace('\\"', '"')
+         .replace("&amp;", "&").replace("&#x2F;", "/"))
+    if "\\u" in s or "\\U" in s:
+        s = re.sub(r"\\u([0-9a-fA-F]{4})",
+                   lambda m: chr(int(m.group(1), 16)), s)
+    return s
+
+
+def _declared_domain_re(declared: dict):
+    """Regex bắt MỌI cách viết domain đã khai báo — kể cả thiếu scheme.
+
+    Vimeo ghi bio là `Website: //sunwindtac.com/` (không có `https:`), nhiều site
+    chỉ ghi `sunwindtac.com` — regex URL thông thường bỏ sót hết.
+    """
+    roots = set(declared["mine_roots"]) | set(declared["root_handles"])
+    roots = {r for r in roots if r}
+    if not roots:
+        return None
+    alt = "|".join(sorted((re.escape(r) for r in roots), key=len, reverse=True))
+    return re.compile(
+        r"(?<![\w.-])(?:https?:)?(?://)?((?:[a-z0-9][a-z0-9-]*\.)*(?:" + alt + r"))"
+        r"(/[^\s\"'<>\\)\]}]*)?", re.I)
+
+
 def _zone_of(tag) -> str:
     """Đi ngược cây DOM tìm khu vực chứa link (chỉ để hiển thị)."""
     node, hops = tag, 0
@@ -329,27 +404,67 @@ def _text_urls(soup, html: str):
 
 
 def _embedded_urls(html: str, declared: dict):
-    """URL đã khai báo nhưng bị nhồi trong JSON/JS/meta thay vì thẻ <a>.
+    """Đích ĐÃ KHAI BÁO nhưng không nằm trong thẻ <a> của HTML thô.
 
-    Trang profile render bằng JS (Pinterest, Tumblr, Gumroad, Twitch...) không đặt
-    link bio trong `<a href>`. Chỉ tìm đúng các đích ĐÃ KHAI BÁO nên không nhiễu.
-    Sinh (url, kind) với kind = 'meta' | 'embed'.
+    Trang profile render bằng JS (Vimeo, Chess.com, Ameba Ownd, Gumroad, Pinterest,
+    Tumblr...) nhồi khối HTML bio vào JSON, hoặc chỉ ghi tên domain trần trong meta
+    description. Ở đây giải mã escape rồi tìm đúng các đích đã khai báo (không quét
+    bừa nên không nhiễu), phân biệt 3 mức:
+
+      - 'embed_a' : là thẻ <a href> thật bên trong JSON → kèm rel để biết dofollow
+      - 'meta'    : chỉ xuất hiện trong thẻ <meta ...> (description/og)
+      - 'embed'   : chỉ xuất hiện đâu đó trong mã (JSON/JS)
+
+    Sinh (url, kind, rel).
     """
     if not html or not (declared["mine_roots"] or declared["root_handles"]):
         return
-    raw = html.replace("\\/", "/").replace("&amp;", "&").replace("&#x2F;", "/")
-    meta_blob = " ".join(m.group(0) for m in re.finditer(r"<meta\b[^>]*>", raw, re.I))
+    raw = _decode_escapes(html)
+    dom_re = _declared_domain_re(declared)
     seen = set()
+
+    # 1) Thẻ <a> nằm trong JSON đã giải mã -> link thật, có cả rel
+    for m in re.finditer(r"<a\b([^>]{0,600}?)>", raw, re.I):
+        attrs = m.group(1)
+        hm = re.search(r'href\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))', attrs, re.I)
+        if not hm:
+            continue
+        url = (next((g for g in hm.groups() if g is not None), "") or "").strip()
+        if not re.match(r"^https?://", url, re.I) or _ASSET_EXT_RE.search(url):
+            continue
+        if not match_declared(url, declared):
+            continue
+        key = _norm(url)
+        if key in seen:
+            continue
+        seen.add(key)
+        rm = re.search(r'rel\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', attrs, re.I)
+        yield url, "embed_a", (next((g for g in (rm.groups() if rm else []) if g), "") or "")
+
+    # 2) URL đầy đủ / tên domain viết trần trong meta rồi trong toàn bộ mã
+    meta_blob = " ".join(m.group(0) for m in re.finditer(r"<meta\b[^>]*>", raw, re.I))
     for blob, kind in ((meta_blob, "meta"), (raw, "embed")):
+        if not blob:
+            continue
         for m in _ANY_URL_RE.finditer(blob):
             url = m.group(0).rstrip(".,;:!?)]}\"'")
             if _ASSET_EXT_RE.search(url) or not match_declared(url, declared):
                 continue
             key = _norm(url)
-            if key in seen:
+            if key not in seen:
+                seen.add(key)
+                yield url, kind, ""
+        if dom_re is None:
+            continue
+        for m in dom_re.finditer(blob):                # thiếu scheme: //a.com/ hoặc a.com
+            url = "https://" + m.group(1) + (m.group(2) or "")
+            url = url.rstrip(".,;:!?)]}\"'")
+            if _ASSET_EXT_RE.search(url) or not match_declared(url, declared):
                 continue
-            seen.add(key)
-            yield url, kind
+            key = _norm(url)
+            if key not in seen:
+                seen.add(key)
+                yield url, kind, ""
 
 
 def extract(html: str, base_url: str, my_domains=(), check_urls=(), declared=None,
@@ -363,6 +478,7 @@ def extract(html: str, base_url: str, my_domains=(), check_urls=(), declared=Non
              "dropped_kind": 0}
     base = {**stats, "external": 0, "external_domains": 0, "dofollow": 0,
             "nofollow": 0, "bio": 0, "content": 0, "text_only": 0, "embedded": 0,
+            "embedded_anchor": 0,
             "page_nofollow": False, "truncated": 0, "links": [], "mine": 0,
             "mine_dofollow": 0, "mine_note": "", "to_checked": 0, "checked_exact": 0}
     if declared is None:
@@ -399,6 +515,14 @@ def extract(html: str, base_url: str, my_domains=(), check_urls=(), declared=Non
             continue
         stats["total"] += 1
 
+        # Link trung gian (href về chính site rồi mới nhảy ra ngoài) -> lấy đích thật,
+        # nếu không sẽ bị tính là "nội bộ" và mất backlink.
+        wrapped = ""
+        inner = unwrap_url(url)
+        if inner and _bare_host(inner) != host:
+            wrapped, url, host = url, inner, _bare_host(inner)
+            kind = "wrap"
+
         if host == src_host or root_domain(host) == src_root:
             stats["dropped_internal"] += 1     # link nội bộ -> không phải backlink
             continue
@@ -418,6 +542,7 @@ def extract(html: str, base_url: str, my_domains=(), check_urls=(), declared=Non
                 "zone": zone, "count": 1, "match": match,
                 "mine": match == "mine", "exact": match == "exact",
                 "to_checked": match in ("exact", "variant"),
+                "via": wrapped,          # URL trung gian đã đi qua (nếu có)
             }
         else:
             row["count"] += 1
@@ -447,24 +572,29 @@ def extract(html: str, base_url: str, my_domains=(), check_urls=(), declared=Non
             "anchor": "—", "rel": "", "follow": "✖ không tính",
             "kind": _KIND_LABEL["text"], "zone": zone, "count": 1, "match": match,
             "mine": match == "mine", "exact": match == "exact",
-            "to_checked": match in ("exact", "variant"),
+            "to_checked": match in ("exact", "variant"), "via": "",
         }
 
     # ---- Link đã khai báo nhưng chỉ nằm trong JSON/JS/meta (trang SPA) ----
-    embed_seen = set()
-    for url, ekind in _embedded_urls(html, declared):
+    embed_seen, embed_anchor = set(), set()
+    for url, ekind, erel in _embedded_urls(html, declared):
         key, host = _norm(url), _bare_host(url)
         if (not host or key in href_keys or key in text_seen or key in embed_seen
                 or root_domain(host) == src_root):
             continue
         embed_seen.add(key)
         match = match_declared(url, declared)
+        if ekind == "embed_a":
+            embed_anchor.add(key)
+            loai, follow = "thẻ a trong JSON/JS", _follow_label(erel, page_nofollow)
+        else:
+            loai, follow = "ẩn trong mã (không phải link)", "✖ không tính"
         merged[f"embed:{key}"] = {
-            "url": url, "domain": host, "loai": "ẩn trong mã (không phải link)",
-            "anchor": "—", "rel": "", "follow": "✖ không tính",
+            "url": url, "domain": host, "loai": loai,
+            "anchor": "—", "rel": erel, "follow": follow,
             "kind": _KIND_LABEL[ekind], "zone": "ẩn trong mã nguồn", "count": 1,
             "match": match, "mine": match == "mine", "exact": match == "exact",
-            "to_checked": match in ("exact", "variant"),
+            "to_checked": match in ("exact", "variant"), "via": "",
         }
 
     rows = list(merged.values())
@@ -474,12 +604,18 @@ def extract(html: str, base_url: str, my_domains=(), check_urls=(), declared=Non
     mine_rows = [r for r in rows if r["mine"]]
     mine_anchor = [r for r in mine_rows if r["loai"] == "ra ngoài"]
     mine_do = [r for r in mine_anchor if r["follow"] == "dofollow"]
+    mine_json = [r for r in mine_rows if r["loai"] == "thẻ a trong JSON/JS"]
     mine_text = [r for r in mine_rows if r["loai"].startswith("text")]
     if not declared["mine_roots"]:
         mine_note = ""
     elif mine_anchor:
         mine_note = (f"✅ {len(mine_anchor)} link" +
                      (f" ({len(mine_do)} dofollow)" if mine_do else " — toàn nofollow"))
+    elif mine_json:
+        jdo = sum(1 for r in mine_json if r["follow"] == "dofollow")
+        mine_note = (f"✅ {len(mine_json)} thẻ a trong JSON/JS "
+                     f"({'dofollow' if jdo else 'nofollow'}) — trang render bằng JS, "
+                     f"mở trình duyệt để xác nhận")
     elif mine_text:
         mine_note = "⚠️ chỉ ở dạng text/không click được — không tính là backlink"
     elif mine_rows:
@@ -503,6 +639,7 @@ def extract(html: str, base_url: str, my_domains=(), check_urls=(), declared=Non
         "content": sum(1 for r in ext if r["zone"] == _ZONE_DEFAULT),
         "text_only": len(text_seen),
         "embedded": len(embed_seen),
+        "embedded_anchor": len(embed_anchor),
         "dropped_internal": stats["dropped_internal"],
         "dropped_undeclared": stats["dropped_undeclared"],
         "dropped_kind": stats["dropped_kind"],
