@@ -91,29 +91,50 @@ def index_to_excel_bytes(rows, checked_at: str = "", group_rows=None) -> bytes:
     return buf.getvalue()
 
 
-def url_to_excel_bytes(rows, checked_at: str = "", group_rows=None) -> bytes:
+def url_to_excel_bytes(rows, checked_at: str = "", group_rows=None,
+                       link_rows=None, page_stat_rows=None) -> bytes:
     """Báo cáo Excel cho chế độ Check URL (sống/chết).
 
     rows: list dict đã hiển thị (STT, URL, Trạng thái, Mã HTTP, ...).
     group_rows: thống kê gom nhóm theo domain (tùy chọn).
-    Sheets: Tổng quan / Theo domain / Tất cả / Chết / Lỗi.
+    link_rows: danh sách link trang trỏ ra (tùy chọn) -> thêm 2 sheet link.
+    page_stat_rows: thống kê link theo TỪNG trang nguồn (mọi URL đã nhập).
+    Sheets: Tổng quan / Theo domain / Tất cả / Chết / Chặn / Lỗi /
+            Link theo trang nguồn / Link trỏ ra / Domain đích.
     """
     df = pd.DataFrame(rows)
     alive = df[df["Trạng thái"] == "✅ sống"] if not df.empty else df
     blocked = df[df["Trạng thái"] == "🔒 chặn"] if not df.empty else df
     dead = df[df["Trạng thái"] == "❌ chết"] if not df.empty else df
     errors = df[df["Trạng thái"] == "⚠️ lỗi"] if not df.empty else df
+    skipped = df[df["Trạng thái"] == "⏭️ bỏ qua"] if not df.empty else df
 
-    summary = pd.DataFrame([
+    ldf = pd.DataFrame(link_rows or [])
+    ext = ldf[ldf["Loại"] == "ra ngoài"] if not ldf.empty else ldf
+
+    stats = [
         {"Chỉ số": "Thời điểm check", "Giá trị": checked_at or "-"},
         {"Chỉ số": "Tổng URL", "Giá trị": len(df)},
         {"Chỉ số": "Sống ✅", "Giá trị": len(alive)},
         {"Chỉ số": "Chặn 🔒 (site sống, chặn bot)", "Giá trị": len(blocked)},
         {"Chỉ số": "Chết ❌", "Giá trị": len(dead)},
         {"Chỉ số": "Lỗi ⚠️", "Giá trị": len(errors)},
-        {"Chỉ số": "Tỉ lệ sống",
-         "Giá trị": f"{(len(alive) / len(df) * 100):.1f}%" if len(df) else "-"},
-    ])
+        {"Chỉ số": "Bỏ qua ⏭️ (rút gọn/bio link/paste)", "Giá trị": len(skipped)},
+        {"Chỉ số": "Tỉ lệ sống (trên số URL đã check)",
+         "Giá trị": (f"{(len(alive) / (len(df) - len(skipped)) * 100):.1f}%"
+                     if len(df) - len(skipped) > 0 else "-")},
+    ]
+    if not ldf.empty:
+        stats += [
+            {"Chỉ số": "🔗 Link ra ngoài", "Giá trị": len(ext)},
+            {"Chỉ số": "🔗 Domain đích khác nhau",
+             "Giá trị": ext["Domain đích"].nunique() if not ext.empty else 0},
+            {"Chỉ số": "🔗 Dofollow",
+             "Giá trị": int((ext["Follow"] == "dofollow").sum()) if not ext.empty else 0},
+            {"Chỉ số": "🔗 URL dạng text (không click được)",
+             "Giá trị": int(ldf["Loại"].astype(str).str.startswith("text").sum())},
+        ]
+    summary = pd.DataFrame(stats)
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -127,6 +148,19 @@ def url_to_excel_bytes(rows, checked_at: str = "", group_rows=None) -> bytes:
             blocked.to_excel(writer, sheet_name="Chặn", index=False)
         if not errors.empty:
             errors.to_excel(writer, sheet_name="Lỗi", index=False)
+        if not skipped.empty:
+            skipped.to_excel(writer, sheet_name="Bỏ qua", index=False)
+        if page_stat_rows:
+            pd.DataFrame(page_stat_rows).to_excel(
+                writer, sheet_name="Link theo trang nguồn", index=False)
+        if not ldf.empty:
+            ldf.to_excel(writer, sheet_name="Link trỏ ra", index=False)
+            if not ext.empty:
+                agg = (ext.groupby("Domain đích")
+                       .agg(**{"Số link": ("Link đích", "count"),
+                               "Số trang trỏ tới": ("STT trang", "nunique")})
+                       .reset_index().sort_values("Số link", ascending=False))
+                agg.to_excel(writer, sheet_name="Domain đích", index=False)
     buf.seek(0)
     return buf.getvalue()
 

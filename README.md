@@ -6,7 +6,7 @@ Bộ công cụ 3 trong 1 (Streamlit), tối ưu cho **site tiếng Việt** (`g
 |--------|--------|--------|
 | 🎰 **Crawl Keyword** | Nghiên cứu keyword đối thủ qua ngõ image SERP | Serper API key |
 | 🔎 **Check Index** | Kiểm tra hàng loạt domain/URL đã được Google index chưa | Serper API key |
-| 🩺 **Check URL** | Kiểm tra hàng loạt URL hợp lệ + sống/chết bằng HTTP | Không cần gì (miễn phí) |
+| 🩺 **Check URL** | Kiểm tra hàng loạt URL hợp lệ + sống/chết bằng HTTP, kèm **đếm & liệt kê link stacking/bio-about** | Không cần gì (miễn phí) |
 | 🚀 **Đẩy Index** | Submit hàng loạt URL vào Google (Indexing API) | Google Service Account |
 
 ---
@@ -122,6 +122,80 @@ Kèm **Mã HTTP**, **thời gian phản hồi (ms)**, **Content-Type**, **URL cu
 
 **Thử lại khi lỗi mạng/5xx:** chỉnh ở sidebar (mặc định 1 lần). Chỉ thử lại khi timeout/đứt kết nối/lỗi server — **không** thử lại 404 vì đó đã là kết luận chắc chắn. Giúp giảm báo `⚠️ lỗi` oan do mạng chập chờn.
 
+### 4.1. 🔗 Đếm & liệt kê link stacking / bio-about (chỉ link ĐÃ KHAI BÁO)
+
+Bật **🔗 Đếm & liệt kê link stacking / bio-about mà trang trỏ ra** trong ⚙️ Cấu hình của tab Check URL.
+
+**Nguyên tắc cốt lõi:** một link chỉ **hợp lệ** khi đích đến của nó **đã được khai báo**:
+
+| Nhãn cột **Đích** | Khớp thế nào |
+|---|---|
+| 🎯 **domain của bạn** | root domain nằm trong ô **🎯 Domain của bạn** (bất kể đường dẫn nào) |
+| 🔁 **khớp URL đang check** | trùng đúng 1 URL trong danh sách nhập — bỏ qua khác biệt `http/https`, `www`, `/` cuối, chữ hoa/thường |
+| 🔁 **biến thể URL đang check** | cùng domain đã khai báo **và** cùng *handle*, vd `hitclubdtac.tumblr.com` ↔ `tumblr.com/hitclubdtac`, `bs.gravatar.com/hitclubdtac` ↔ `gravatar.com/hitclubdtac` |
+
+**Mọi link khác đều KHÔNG hợp lệ → không liệt kê, chỉ đếm:**
+- Link nội bộ cùng domain với trang nguồn → cột `Bỏ: nội bộ`.
+- Social / nền tảng **của chính site chủ** (vd `instagram.com/zachmoonshinemdpr`, `jamroom.net`, `makewebeasy.com` trên trang forum của họ) → cột `Bỏ: không khai báo`.
+- **Cùng domain đã khai báo nhưng khác handle** — vd bạn khai `x.com/HITCLUBDTAC` mà trang trỏ tới `x.com/ZachMoonshine` → cũng loại, vì đó là tài khoản người khác.
+- Quảng cáo, iframe/js nhúng, `mailto:` `tel:` `javascript:`, file CSS/JS/ảnh.
+
+*Handle* được lấy tự động từ URL bạn nhập (nhãn subdomain + các đoạn đường dẫn + giá trị query), bỏ các từ chung chung (`user`, `users`, `profile`, `forum`, `about`, `page`...) và token ngắn dưới 5 ký tự. Chuẩn hoá bỏ dấu gạch nên `hitclub-dtac` = `hitclub_dtac` = `hitclub.dtac` = `hitclubdtac`.
+
+**Ví dụ thực tế** (danh sách nhập = file test `example/sample.txt` ở máy, domain của bạn = `hitclubdtac.com`):
+
+| Trang nguồn | Kết quả |
+|---|---|
+| `gamblingtherapy.org/forum/users/hitclubdtac/` | **20 link hợp lệ** = 1 🎯 + 19 🔁 (behance, bsky, deviantart, flickr, github, bandcamp, issuu, kickstarter, letterboxd, pinterest, plurk, quora, reddit...) · loại 141 nội bộ + 5 không khai báo |
+| `metaldevastationradio.com/hitclubdtac` | **1 link hợp lệ** = 🎯 `hitclubdtac.com` · loại 8 link social/nền tảng của chủ site |
+| `www.fw-follow.com/forum/topic/.../hitclubdtac` | **1 link hợp lệ** · loại `line.me`, `makewebeasy.com` |
+
+**URL dạng chữ** (không click được) và **URL chỉ nằm trong JSON/JS/meta** (trang render bằng JS như Pinterest, Tumblr, Gumroad) cũng chỉ liệt kê khi khớp khai báo, kèm nhãn riêng `📄 text thường` / `📦 ẩn trong JSON/JS` và **không tính là backlink** — dùng để biết link *có tồn tại* nhưng cần mở trình duyệt xác nhận.
+
+**Các cột thêm vào bảng kết quả:** `Link stacking/bio` (số link hợp lệ) · `Trong bio/about` · `Trong nội dung` · `Domain đích` · `Dofollow` / `Nofollow` · `Khớp URL đang check` · `Khớp URL/biến thể` · `URL dạng text (không click)` · `Ẩn trong JSON/JS` · `Bỏ: nội bộ` · `Bỏ: không khai báo` · `Link về bạn`.
+
+**Ô 🎯 Domain của bạn:** mọi cách viết đều **như nhau** — `https://a.com/`, `www.a.com`, `a.com`, `A.COM:443/abc?x=1` → đều hiểu là `a.com`; subdomain (`blog.a.com`) cũng khớp. Cột **Link về bạn** báo ngay:
+- `✅ 2 link (1 dofollow)` — backlink đã lên thật.
+- `⚠️ chỉ ở dạng text/không click được` — site chỉ in URL ra chữ → **không tính là backlink**.
+- `⚠️ chỉ thấy trong JSON/JS/meta` — trang render bằng JS, cần mở trình duyệt xác nhận.
+- `❌ không thấy link về domain của bạn` — link đã bị xóa/chưa duyệt.
+
+Nếu trang khai `<meta robots nofollow>` thì tool ghi chú rõ: **mọi link trên trang đều mất giá trị**.
+
+**📊 Bảng "Theo trang nguồn" — thống kê ĐỦ mọi URL đã nhập:** trong tab 🔗 Link trỏ ra, **mỗi URL bạn nhập đúng 1 dòng**, kể cả trang 0 link hoặc không đọc được, kèm cột **Ghi chú**:
+- `✅ đã quét` · `⚠️ chỉ tìm thấy link trong JSON/JS/meta` · `⚠️ HTML không có thẻ <a>` (JS render / trang xác minh chống bot) · `❌ không quét được — chặn/chết (HTTP ...)` · `⏭️ bỏ qua — <dạng>` · `chỉ có link nội bộ/menu`.
+
+Bảng này cũng xuất thành sheet Excel **Link theo trang nguồn**, nên "0 link vì bị chặn" không bị hiểu lẫn với "0 link vì không có backlink".
+
+**Lọc trùng chỉ trong PHẠM VI 1 TRANG NGUỒN:** cùng 1 URL đích xuất hiện trên 5 trang nguồn khác nhau = **5 dòng**. Cột `Số lần` là số lần URL đó lặp *trong chính trang đó* (2 thẻ `<a>` cùng đích trên cùng 1 trang = 1 dòng, `Số lần = 2`).
+
+**Tab 🔗 Link trỏ ra** liệt kê từng link kèm **Anchor text**, **Follow** (dofollow / nofollow / ugc / sponsored), **Vị trí** (bio/profile · nội dung · footer · menu...), **Số lần**, cột **Đích** + bộ lọc nhanh (Tất cả · 🎯 domain của bạn · 🔁 khớp đúng URL · Trong bio/about · 📄 Text / 📦 ẩn JSON-JS) và ô tìm theo chuỗi. Kèm bảng **🌐 Gom theo domain đích**.
+
+**Giới hạn 10 link/trang trên giao diện:** nếu 1 trang có hơn 10 link hợp lệ, bảng chỉ hiện **10 link đầu**, kèm dòng đếm **số lượng thật** (vd `gamblingtherapy.org/... = 20`). Tích ô **📤 Xuất đầy đủ tất cả N link ra file** rồi tải Excel/CSV để lấy trọn danh sách; mặc định file tải về cũng chỉ 10 link/trang.
+
+**Bộ test:** đặt danh sách URL thật vào `example/sample.txt` (thư mục `example/` đã gitignore — không đẩy backlink của bạn lên repo). Bộ test đang dùng: 720 URL. Dán cả file vào ô URL để kiểm thử: chạy hết trong ~2 phút (0.16s/URL, 24 luồng), ra ~11.200 link hợp lệ, loại ~4.600 link không khai báo + ~22.000 link nội bộ.
+
+**Lưu ý:** chỉ quét được trên trang **✅ sống**. Hai ô cấu hình kèm theo: **Giới hạn tải nội dung mỗi trang (KB)** — trang nhiều link cần tăng để không hụt link ở cuối trang; **Số link lưu tối đa mỗi trang** — giới hạn lưu, phần bị cắt được báo rõ.
+
+### 4.2. ⏭️ Bỏ qua domain rút gọn / link-in-bio / paste
+
+Nhiều URL trong danh sách backlink không phải trang nội dung mà là **dịch vụ trung gian**: link rút gọn, trang "link in bio", paste/pad công khai, bài đăng nhanh. Check sống/chết hay đếm link trỏ ra ở đó không có ý nghĩa (chúng vốn sinh ra để chứa link, phần lớn render bằng JS).
+
+Tùy chọn **⏭️ Bỏ qua domain rút gọn / link-in-bio / paste** (bật mặc định) → tool **không gửi request**, chỉ gắn nhãn `⏭️ bỏ qua` kèm **loại**:
+
+| Nhãn | Ví dụ domain |
+|------|--------------|
+| 🔗 link rút gọn | `bit.ly` `zzb.bz` `urlz.fr` `n9.cl` `tinyurl.com` `cutt.ly` `t.co`... |
+| 🪪 trang link-in-bio | `linktr.ee` `bio.site` `beacons.ai` `many.link` `manylink.co` `lit.link` `magic.ly` `linksta.cc` `linkmix.co` `mez.ink` `joy.bio` `jaga.link` `biolinku.co` `allmylinks.com` `album.link`... |
+| 📋 paste/ghi chú công khai | `justpaste.it` `pastebin.com` `paste.ee` `rentry.co` `notes.io`... |
+| 📝 pad công khai (HedgeDoc/CodiMD) | `pad.stuve.de/s/...` `md.chaosdorf.de/s/...` (nhận theo mẫu `pad.` / `md.` + đường dẫn `/s/...`) |
+| 📰 bài đăng nhanh | `telegra.ph` `te.legra.ph` `graph.org` |
+| ⏭️ do bạn khai báo | domain bạn tự nhập ở ô **Domain bỏ qua thêm** |
+
+Kết quả: thêm ô số **⏭️ Bỏ qua**, tab **⏭️ Bỏ qua** liệt kê từng URL kèm dạng, cột **Bỏ qua** trong bảng theo domain, sheet Excel **Bỏ qua**, và **tỉ lệ sống tính trên số URL đã check thật** (không tính phần bỏ qua). Muốn check cả chúng thì tắt tùy chọn này.
+
+Danh sách domain nằm trong [url_types.py](url_types.py) — thêm domain mới = thêm 1 dòng vào set tương ứng; hoặc nhập nhanh trong ô **⏭️ Domain bỏ qua thêm** ngay trên giao diện.
+
 **Mẹo:**
 - Bật **🛡️ Vượt anti-bot** để nhiều site Cloudflare không bị báo "chặn" oan (chúng trả 403 cho request thường nhưng 200 cho trình duyệt thật).
 - URL rơi vào **🔒 chặn** thì mở bằng trình duyệt để kiểm tra chắc chắn — tool không thể phân biệt 100% giữa "chặn bot" và "sập thật" ở các mã như 503.
@@ -212,6 +286,8 @@ Bước này **bắt buộc**, thiếu là bị lỗi **403** khi đẩy.
 | `extractors.py` | Parse SERP, trích keyword, scrape HTML |
 | `index_checker.py` | Logic Check Index (`site:`) + gom nhóm domain gốc |
 | `url_checker.py` | Logic Check URL (HTTP sống/chết) + gom nhóm domain |
+| `link_extractor.py` | Bóc link stacking/bio-about trỏ ra ngoài (lọc nội bộ/menu/footer/ads, dofollow/nofollow, vị trí) |
+| `url_types.py` | Nhận diện domain rút gọn / link-in-bio / paste / pad để bỏ qua không check |
 | `index_pusher.py` | Logic Đẩy Index (Google Indexing API) + xoay Service Account |
 | `key_store.py` | Lưu/test/quản lý Serper key |
 | `filters.py` | Blacklist / whitelist domain |

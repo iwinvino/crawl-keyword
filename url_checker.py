@@ -11,16 +11,23 @@ Phân loại mỗi dòng:
   - ⚠️ lỗi:      URL sai định dạng / DNS fail / timeout / từ chối kết nối / SSL
 
 Tái dùng chuỗi vượt anti-bot: curl_cffi (giả lập TLS Chrome) -> cloudscraper -> requests.
+
+Tuỳ chọn `scan_links`: đếm & liệt kê link mà trang đang trỏ ra (xem `link_extractor`)
+— dùng để soi stacking link, link chèn trong bio, và kiểm tra link của mình có
+được render thành thẻ <a> thật hay chỉ là chữ.
 """
 from __future__ import annotations
 
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
+
+import link_extractor
+import url_types
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -203,6 +210,9 @@ _BLOCK_PAGE_SIGNS = [
     r"enable javascript and cookies", r"verify (?:you are|you're) (?:a )?human",
     r"are you a (?:robot|human)", r"human verification", r"bot (?:detection|protection)",
     r"ddos protection", r"security check", r"browser verification",
+    # Trang "chờ xác minh" trả HTTP 200 (Reddit, một số CDN) — site sống, chặn tool
+    r"wait for verification", r"please wait", r"verifying (?:you|your|browser|request)",
+    r"vui lòng (?:đợi|chờ)", r"đang xác minh",
     r"browser not supported", r"unsupported browser", r"trình duyệt không được hỗ trợ",
     r"you have been blocked", r"unable to access this website",
     r"access denied", r"403 forbidden", r"\b403\b", r"error 10\d\d",
@@ -371,7 +381,7 @@ class UrlResult:
     domain: str            # host để gom nhóm
     valid: bool            # định dạng URL hợp lệ
     alive: bool            # sống (2xx) hay không
-    category: str          # "sống" | "redirect" | "chặn" | "chết" | "lỗi"
+    category: str          # "sống" | "redirect" | "chặn" | "chết" | "lỗi" | "bỏ qua"
     status_code: int       # mã HTTP (0 nếu không kết nối được)
     final_url: str = ""    # URL cuối sau redirect (hoặc Location nếu 3xx)
     redirected: bool = False
@@ -383,6 +393,28 @@ class UrlResult:
     meta_refresh: bool = False  # có nhảy bằng <meta refresh> không
     anchor: str = ""            # phần #fragment của URL (nếu có)
     anchor_ok: bool | None = None   # None = không kiểm tra; False = thiếu anchor
+    # ---- Link stacking / bio-about trang này trỏ ra (chỉ khi bật scan_links) ----
+    links_total: int = 0        # tổng link http trên trang (trước khi lọc)
+    links_external: int = 0     # link ra ngoài trong vùng bio/nội dung (đã gộp trùng)
+    links_ext_domains: int = 0  # số domain đích khác nhau
+    links_dofollow: int = 0     # trong số link ra ngoài
+    links_nofollow: int = 0
+    links_bio: int = 0          # nằm trong khối bio/profile/about
+    links_content: int = 0      # nằm trong nội dung
+    links_text_only: int = 0    # URL viết dạng chữ, KHÔNG click được
+    links_embedded: int = 0     # link của bạn nhồi trong JSON/JS/meta (trang SPA)
+    links_to_checked: int = 0   # link khớp URL đang check (kể cả biến thể)
+    links_checked_exact: int = 0  # khớp đúng 1 URL trong danh sách đang check
+    drop_internal: int = 0      # đã bỏ: link nội bộ cùng domain
+    drop_undeclared: int = 0    # đã bỏ: KHÔNG khớp khai báo nào -> không hợp lệ
+    drop_kind: int = 0          # đã bỏ: mailto/tel/javascript
+    page_nofollow: bool = False # <meta robots nofollow> -> cả trang mất giá trị
+    links_truncated: int = 0    # số link bị cắt do vượt giới hạn lưu
+    my_links: int = 0           # link trỏ về domain của bạn (thẻ a thật)
+    my_links_dofollow: int = 0
+    my_links_note: str = ""
+    skip_type: str = ""         # loại dịch vụ trung gian (rút gọn/bio link/paste...)
+    outbound: list = field(default_factory=list)   # danh sách link chi tiết
 
 
 # Ký tự vô hình hay dính khi copy (zero-width, BOM)
@@ -476,11 +508,11 @@ def _read_body(r, engine: str, limit: int = _BODY_LIMIT) -> str:
 
 
 def _probe_once(engine: str, url: str, timeout: int, follow: bool,
-                want_body: bool = False):
+                want_body: bool = False, body_limit: int = _BODY_LIMIT):
     """Gửi 1 request bằng 1 engine.
 
     Trả về (status, final_url, redirected, ctype, body). `body` chỉ được đọc khi
-    want_body=True và phản hồi là 2xx dạng HTML (để dò soft 404).
+    want_body=True và phản hồi là 2xx dạng HTML (để dò soft 404 / quét link).
     """
     body = ""
     if engine == "cffi":
@@ -495,7 +527,7 @@ def _probe_once(engine: str, url: str, timeout: int, follow: bool,
             ctype = (r.headers.get("Content-Type", "") or "").split(";")[0].strip()
             location = r.headers.get("Location", "") if not follow else ""
             if want_body and 200 <= status < 300 and _is_html(ctype):
-                body = _read_body(r, engine)
+                body = _read_body(r, engine, body_limit)
         finally:
             close = getattr(r, "close", None)
             if close:
@@ -529,7 +561,7 @@ def _probe_once(engine: str, url: str, timeout: int, follow: bool,
             ctype = (r.headers.get("Content-Type", "") or "").split(";")[0].strip()
             location = r.headers.get("Location", "") if not follow else ""
             if want_body and 200 <= status < 300 and _is_html(ctype):
-                body = _read_body(r, engine)
+                body = _read_body(r, engine, body_limit)
         finally:
             r.close()
     if not follow and 300 <= status < 400 and location:
@@ -538,7 +570,7 @@ def _probe_once(engine: str, url: str, timeout: int, follow: bool,
 
 
 def _probe_engines(url: str, timeout: int, anti_bot: bool, follow: bool,
-                   want_body: bool):
+                   want_body: bool, body_limit: int = _BODY_LIMIT):
     """Thử lần lượt các engine. Trả về (status, final, redirected, ctype, err, body, hist)."""
     engines = []
     if anti_bot and _CFFI:
@@ -552,7 +584,7 @@ def _probe_engines(url: str, timeout: int, anti_bot: bool, follow: bool,
     for eng in engines:
         try:
             status, final, redirected, ctype, body, hist, rcount = _probe_once(
-                eng, url, timeout, follow, want_body)
+                eng, url, timeout, follow, want_body, body_limit)
             if 200 <= status < 400:          # sống/redirect -> chốt luôn
                 return status, final, redirected, ctype, "", body, hist, rcount
             if fallback is None:             # 4xx/5xx: giữ lại, biết đâu engine khác qua được
@@ -566,19 +598,20 @@ def _probe_engines(url: str, timeout: int, anti_bot: bool, follow: bool,
 
 
 def _http_probe(url: str, timeout: int, anti_bot: bool, follow: bool,
-                want_body: bool = False, retries: int = 1):
+                want_body: bool = False, retries: int = 1,
+                body_limit: int = _BODY_LIMIT):
     """Như _probe_engines nhưng thử lại khi lỗi mạng / 5xx.
 
     KHÔNG thử lại 4xx: 404 là kết luận chắc chắn, retry chỉ tốn thời gian.
     Chỉ lỗi tạm thời (timeout, đứt kết nối, 5xx) mới đáng thử lại.
     """
-    result = _probe_engines(url, timeout, anti_bot, follow, want_body)
+    result = _probe_engines(url, timeout, anti_bot, follow, want_body, body_limit)
     for _ in range(max(0, retries)):
         status = result[0]
         if not (status == 0 or 500 <= status < 600):
             break                            # 2xx/3xx/4xx -> khỏi thử lại
         time.sleep(1.0)
-        result = _probe_engines(url, timeout, anti_bot, follow, want_body)
+        result = _probe_engines(url, timeout, anti_bot, follow, want_body, body_limit)
     return result
 
 
@@ -600,29 +633,64 @@ def _chain_info(hist: list, rcount: int = 0) -> tuple[str, bool]:
     return chain, all(c in (301, 308) for c in hist)
 
 
+def _link_fields(body: str, base_url: str, declared, max_links: int) -> dict:
+    """Chuyển kết quả link_extractor thành các field của UrlResult."""
+    s = link_extractor.extract(body, base_url, declared=declared,
+                               max_links=max_links)
+    return dict(
+        links_total=s["total"], links_external=s["external"],
+        links_ext_domains=s["external_domains"], links_dofollow=s["dofollow"],
+        links_nofollow=s["nofollow"], links_bio=s["bio"], links_content=s["content"],
+        links_text_only=s["text_only"], links_embedded=s["embedded"],
+        links_to_checked=s["to_checked"], links_checked_exact=s["checked_exact"],
+        drop_internal=s["dropped_internal"],
+        drop_undeclared=s["dropped_undeclared"], drop_kind=s["dropped_kind"],
+        page_nofollow=s["page_nofollow"], links_truncated=s["truncated"],
+        my_links=s["mine"], my_links_dofollow=s["mine_dofollow"],
+        my_links_note=s["mine_note"], outbound=s["links"],
+    )
+
+
 def check_one(stt: int, line: str, timeout: int = 20, anti_bot: bool = True,
               follow: bool = True, soft404: bool = True,
-              retries: int = 1) -> UrlResult:
+              retries: int = 1, scan_links: bool = False, my_domains=(),
+              body_limit: int = _BODY_LIMIT,
+              max_links: int = link_extractor.MAX_LINKS_PER_PAGE,
+              declared=None, skip_services: bool = True,
+              extra_skip=()) -> UrlResult:
     url, valid, reason = normalize_url(line)
     domain = urlparse(url).hostname or "" if url else ""
     if not valid:
         return UrlResult(stt, line, url, domain, False, False, "lỗi", 0,
                          note=reason)
+
+    # Dịch vụ trung gian (rút gọn link / link-in-bio / paste / pad / Telegraph):
+    # chỉ ghi nhận là dạng gì rồi bỏ qua — không gửi request, không quét link.
+    if skip_services:
+        _kind, label = url_types.classify(url, extra_skip)
+        if label:
+            return UrlResult(stt, line, url, domain, True, False, "bỏ qua", 0,
+                             skip_type=label,
+                             note=f"{label} — bỏ qua, không check")
     fragment = urlparse(url).fragment
+    # Quét link cũng cần đọc nội dung trang (dù người dùng tắt dò soft 404)
+    want_body = soft404 or scan_links
 
     t0 = time.perf_counter()
     status, final, redirected, ctype, err, body, hist, rcount = _http_probe(
-        url, timeout, anti_bot, follow, want_body=soft404, retries=retries)
+        url, timeout, anti_bot, follow, want_body=want_body, retries=retries,
+        body_limit=body_limit)
 
     # --- Theo <meta http-equiv="refresh"> (trình duyệt đi theo, request thì không) ---
     meta_hit = False
-    meta_target = find_meta_refresh(body, final) if (soft404 and follow and body) else ""
+    meta_target = find_meta_refresh(body, final) if (follow and body) else ""
     hops = 0
     while meta_target and _norm_link(meta_target) != _norm_link(final) \
             and hops < _MAX_META_HOPS:
         meta_hit, hops = True, hops + 1
         status, final, _rd, ctype, err, body, hist2, rc2 = _http_probe(
-            meta_target, timeout, anti_bot, follow, want_body=soft404, retries=retries)
+            meta_target, timeout, anti_bot, follow, want_body=want_body,
+            retries=retries, body_limit=body_limit)
         hist, rcount = hist + hist2, rcount + rc2
         if not (200 <= status < 300) or not body:
             break
@@ -661,7 +729,14 @@ def check_one(stt: int, line: str, timeout: int = 20, anti_bot: bool = True,
                                  note=f"bị đá về trang chủ ({final}) — trang gốc nhiều khả năng đã gỡ")
 
         # Trang sống. Kiểm tra thêm #anchor có thật sự tồn tại không.
-        anchor_ok = check_anchor(body, fragment) if (soft404 and body) else None
+        anchor_ok = check_anchor(body, fragment) if body else None
+        # Đếm & liệt kê link stacking / bio-about trang này đang trỏ ra
+        if scan_links and body:
+            base.update(_link_fields(
+                body, final,
+                declared if declared is not None
+                else link_extractor.build_declared(my_domains, ()),
+                max_links))
         notes = []
         if meta_hit:
             notes.append(f"meta refresh → {final}")
@@ -671,6 +746,10 @@ def check_one(stt: int, line: str, timeout: int = 20, anti_bot: bool = True,
             notes.append("301 vĩnh viễn" if permanent else f"redirect tạm ({chain})")
         if anchor_ok is False:
             notes.append(f"⚠️ không tìm thấy anchor #{fragment} trên trang")
+        if base.get("my_links_note"):
+            notes.append(base["my_links_note"])
+        if base.get("page_nofollow"):
+            notes.append("⚠️ trang khai <meta robots nofollow> — mọi link đều mất giá trị")
         return UrlResult(stt, line, url, domain, True, True, "sống", status,
                          **base, anchor_ok=anchor_ok, note=" · ".join(notes))
     if 300 <= status < 400:   # chỉ xảy ra khi follow=False
@@ -690,16 +769,36 @@ def check_one(stt: int, line: str, timeout: int = 20, anti_bot: bool = True,
 
 def check_bulk(lines, timeout: int = 20, anti_bot: bool = True, follow: bool = True,
                max_workers: int = 8, progress=None, soft404: bool = True,
-               retries: int = 1):
-    """Chạy song song. progress(done, total, msg) gọi sau mỗi dòng xong."""
+               retries: int = 1, scan_links: bool = False, my_domains=(),
+               body_limit: int = _BODY_LIMIT,
+               max_links: int = link_extractor.MAX_LINKS_PER_PAGE,
+               skip_services: bool = True, extra_skip=()):
+    """Chạy song song. progress(done, total, msg) gọi sau mỗi dòng xong.
+
+    Khi scan_links: dựng MỘT bộ khai báo từ `my_domains` + TOÀN BỘ URL trong danh
+    sách nhập, rồi dùng cho mọi trang. Chỉ link có đích khớp bộ khai báo này mới
+    được coi là hợp lệ (xem `link_extractor.match_declared`).
+    """
     items = [(i + 1, ln) for i, ln in enumerate(lines) if ln.strip()]
     total = len(items)
     results: list[UrlResult] = []
     done = 0
+    # Bộ khai báo (domain của bạn + toàn bộ URL trong danh sách) — tính MỘT LẦN
+    # rồi dùng cho mọi trang: chỉ link khớp bộ này mới được coi là hợp lệ.
+    declared = None
+    if scan_links:
+        urls = set()
+        for _, ln in items:
+            u, ok, _ = normalize_url(ln)
+            if ok:
+                urls.add(u)
+        declared = link_extractor.build_declared(my_domains, urls)
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
         futures = {
             ex.submit(check_one, stt, ln, timeout, anti_bot, follow,
-                      soft404, retries): (stt, ln)
+                      soft404, retries, scan_links, my_domains,
+                      body_limit, max_links, declared,
+                      skip_services, extra_skip): (stt, ln)
             for stt, ln in items
         }
         for fut in as_completed(futures):

@@ -11,3 +11,5 @@ venv/
 *.md.out
 .streamlit/secrets.toml
 *.bak
+# Danh sach backlink that de test - khong day len repo cong khai
+example/
