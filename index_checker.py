@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from providers import SerperError
 
@@ -70,14 +70,15 @@ def parse_line(line: str):
 
 
 def _norm_link(link: str) -> str:
-    """Chuẩn hoá link để so khớp: bỏ scheme/www/slash cuối, host về lowercase."""
+    """Chuẩn hoá link để so khớp: bỏ scheme/www/slash cuối, host về lowercase,
+    giải mã %XX để URL dạng encoded/decoded đều khớp nhau."""
     if not link:
         return ""
     if not re.match(r"^https?://", link, re.IGNORECASE):
         link = "http://" + link
     p = urlparse(link)
     host = re.sub(r"^www\.", "", p.netloc.lower())
-    return f"{host}{p.path.rstrip('/')}"
+    return f"{host}{unquote(p.path).rstrip('/')}"
 
 
 def _total_results(data: dict) -> int:
@@ -98,7 +99,16 @@ def check_one(stt: int, line: str, provider, pages: int = 10) -> IndexResult:
         return IndexResult(stt, line, "", "", False, 0, loi="dòng rỗng/không hợp lệ")
 
     dom = root_domain(target)
-    query = f"site:{target}"
+    if loai == "url":
+        # site: + URL đầy đủ luôn trả 0 kết quả với path dài/encoded, dù page
+        # đã index -> dùng site:domain + đoạn path cuối (đã giải mã) trong
+        # ngoặc kép, rồi so link organic để xác nhận đúng URL.
+        p = urlparse(target if re.match(r"^https?://", target, re.IGNORECASE)
+                     else "http://" + target)
+        seg = unquote(p.path).strip("/").split("/")[-1].replace('"', " ").strip()
+        query = f'site:{p.netloc} "{seg}"' if seg else f"site:{p.netloc}"
+    else:
+        query = f"site:{unquote(target)}"
     try:
         data = provider.web_search(query, num=pages)
     except (SerperError, RuntimeError) as exc:

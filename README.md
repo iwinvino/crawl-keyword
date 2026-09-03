@@ -1,10 +1,11 @@
 # SEO iGaming Toolkit
 
-Bộ công cụ 3 trong 1 (Streamlit), tối ưu cho **site tiếng Việt** (`gl=vn`, `hl=vi`):
+Bộ công cụ nhiều trong 1 (Streamlit), tối ưu cho **site tiếng Việt** (`gl=vn`, `hl=vi`):
 
 | Chế độ | Làm gì | Cần gì |
 |--------|--------|--------|
 | 🎰 **Crawl Keyword** | Nghiên cứu keyword đối thủ qua ngõ image SERP | Serper API key |
+| 🕸️ **Tìm Backlink** | Tìm backlink đối thủ qua SERP mining + xác minh HTML (không cần Ahrefs) | Serper / SerpApi / DataForSEO |
 | 🔎 **Check Index** | Kiểm tra hàng loạt domain/URL đã được Google index chưa | Serper API key |
 | 🩺 **Check URL** | Kiểm tra hàng loạt URL hợp lệ + sống/chết bằng HTTP, kèm **đếm & liệt kê link stacking/bio-about** | Không cần gì (miễn phí) |
 | 🚀 **Đẩy Index** | Submit hàng loạt URL vào Google (Indexing API) | Google Service Account |
@@ -51,6 +52,61 @@ Từ khóa → Serper Image Search → trang/site chứa ảnh → site:domain (
 - **Cache**: bật để chạy lại không tốn thêm credit Serper.
 
 **Chi phí credit:** mỗi từ khóa = 1 request ảnh; mỗi domain = 1 request `site:`.
+
+---
+
+## 2b. 🕸️ Tìm Backlink — tìm backlink đối thủ khi Ahrefs bị chặn
+
+Dùng khi đối thủ chặn `AhrefsBot`/`SemrushBot` trong `robots.txt` hoặc chặn ở WAF.
+Không hỏi index backlink của ai cả — tự đi tìm qua SERP rồi **tự xác minh**.
+
+Luồng **2 tầng** ([backlink_finder.py](backlink_finder.py)):
+
+```
+Tầng 1 — SERP  : domain đích → sinh footprint query (× nhiều quốc gia)
+                 → nguồn SERP (Serper / SerpApi / DataForSEO) → URL ứng viên
+Tầng 2 — Xác minh: tải HTML từng ứng viên → link_extractor tìm thẻ <a> thật
+                 trỏ về domain đích → anchor, dofollow/nofollow, vị trí trên trang
+```
+
+> SERP chỉ cho **ứng viên**. Rất nhiều trang chỉ *nhắc tên* domain chứ không đặt link —
+> bỏ tầng 2 là báo số ảo, nên tầng 2 mặc định luôn bật.
+
+**Cách dùng:**
+1. Nhập **domain đích** (đối thủ). Thêm tên brand nếu muốn bắt link anchor brand
+   không viết ra domain; thêm đường dẫn trang con để tìm deep link.
+2. Chọn **nguồn SERP**. Chọn 1 nguồn = chạy rẻ; chọn từ 2 nguồn trở lên = **Gộp**
+   (cộng dồn + loại trùng), chỉ nên dùng khi 1 nguồn phủ không đủ.
+3. Chọn **nhóm footprint** + **quốc gia SERP** (`vn:vi, us:en`) — cùng 1 query đổi
+   quốc gia sẽ ra tập kết quả khác nhau.
+4. Bấm **🔍 Tìm backlink** → xem tab Backlink / Domain nguồn / Ứng viên SERP →
+   tải CSV hoặc Excel (5 sheet).
+
+**Kết quả:** `Domain nguồn | Trang đặt link | Link đích | Anchor | Follow | Vị trí | Kiểu | Tìm ra bởi`.
+Trạng thái mỗi ứng viên: ✅ có link · ❌ không có link · ⚠️ chỉ text/JS · 💀 trang chết.
+
+**⚠️ Serper tài khoản FREE chặn cú pháp** — kiểm chứng 2026-07-28:
+
+| Cú pháp | Free | Ghi chú |
+|---|:---:|---|
+| `"cụm chính xác"` | ❌ | HTTP 400 `Query pattern not allowed for free accounts` |
+| `intext:` | ❌ | như trên |
+| `-site:` `site:` `inurl:` `filetype:` `OR` | ✅ | dùng bình thường |
+
+→ Bật ô **"Tài khoản Serper Free — bỏ dấu ngoặc kép & intext:"** (mặc định bật):
+tool tự bỏ ngoặc kép, gộp các query trùng nhau sau khi bỏ để khỏi đốt credit 2 lần,
+và vẫn tự thử lại 1 lần nếu nguồn báo chặn cú pháp. Tài khoản trả phí thì tắt đi
+để khớp cụm chính xác hơn.
+
+**Giới hạn cần biết:**
+- Google trả tối đa ~300 kết quả/query → bù bằng **nhiều query khác nhau**, không phải phân trang sâu.
+- Chỉ bắt được link trên trang đã index và có nhắc domain/brand ở dạng chữ.
+- Không thay thế được index backlink đầy đủ của Ahrefs — đây là công cụ **phát hiện
+  link mới nhanh + bù chỗ bị chặn**. Bổ trợ đúng chỗ trống của 🩺 Check URL
+  (tab đó check backlink *đã biết* còn sống không; tab này đi *tìm ra* link chưa biết).
+
+**Chi phí credit:** mỗi query = `ceil(số kết quả / 10)` credit Serper. App hiện ước
+tính ngay trên nút chạy. Bật cache → chạy lại gần như 0 credit. Tầng 2 miễn phí (HTTP thường).
 
 ---
 
@@ -298,9 +354,10 @@ Bước này **bắt buộc**, thiếu là bị lỗi **403** khi đẩy.
 
 | File | Vai trò |
 |------|---------|
-| `app.py` | Giao diện Streamlit (4 chế độ) |
+| `app.py` | Giao diện Streamlit (mỗi chế độ 1 tab) |
 | `pipeline.py` | Điều phối luồng crawl + đa luồng + progress |
 | `providers.py` | `SerperProvider` — nhiều key + xoay vòng, phân trang `site:` |
+| `backlink_finder.py` | Tìm Backlink: footprint query, nguồn SERP đa nguồn (`SerpSource` + `build_source` + `AggregateSource`), thu ứng viên, xác minh HTML |
 | `extractors.py` | Parse SERP, trích keyword, scrape HTML |
 | `index_checker.py` | Logic Check Index (`site:`) + gom nhóm domain gốc |
 | `url_checker.py` | Logic Check URL (HTTP sống/chết) + gom nhóm domain |
@@ -310,7 +367,7 @@ Bước này **bắt buộc**, thiếu là bị lỗi **403** khi đẩy.
 | `key_store.py` | Lưu/test/quản lý Serper key |
 | `filters.py` | Blacklist / whitelist domain |
 | `cache.py` | Cache file tiết kiệm credit |
-| `exporters.py` | Xuất Markdown / CSV / Excel cho cả 4 chế độ |
+| `exporters.py` | Xuất Markdown / CSV / Excel cho mọi chế độ |
 | `config.py`, `models.py` | Cấu hình & kiểu dữ liệu |
 
 ---

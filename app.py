@@ -10,6 +10,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+import backlink_finder
 import exporters
 import index_checker
 import index_pusher
@@ -212,10 +213,12 @@ def make_provider(keys, gl, hl, timeout, use_cache):
 
 
 st.title("🎰 SEO iGaming Toolkit")
-st.caption("Crawl keyword đối thủ · Check index · Check URL sống/chết · Đẩy index — qua Serper & Google API")
+st.caption("Crawl keyword đối thủ · Tìm backlink đối thủ · Check index · Check URL sống/chết · "
+           "Đẩy index — qua Serper & Google API")
 
-tab_crawl, tab_index, tab_url, tab_push, tab_settings = st.tabs(
-    ["🎰 Crawl Keyword", "🔎 Check Index", "🩺 Check URL", "🚀 Đẩy Index", "⚙️ Cài đặt"]
+tab_crawl, tab_backlink, tab_index, tab_url, tab_push, tab_settings = st.tabs(
+    ["🎰 Crawl Keyword", "🕸️ Tìm Backlink", "🔎 Check Index", "🩺 Check URL",
+     "🚀 Đẩy Index", "⚙️ Cài đặt"]
 )
 
 # ==================================================================
@@ -1204,6 +1207,289 @@ with tab_push:
             st.caption("URL đẩy lỗi — kiểm tra lại ownership Search Console / URL hợp lệ / quota.")
             st.dataframe([d for d in display if d["Trạng thái"] == "❌"],
                          use_container_width=True, height=400, hide_index=True)
+
+# ==================================================================
+# TAB: TÌM BACKLINK (SERP mining + xác minh HTML)
+# ==================================================================
+with tab_backlink:
+    st.subheader("Tìm Backlink đối thủ")
+    st.caption("Không phụ thuộc index Ahrefs/Semrush (đối thủ chặn bot vẫn tìm được): "
+               "sinh footprint query → lấy URL ứng viên từ SERP → tải HTML từng trang "
+               "để xác minh có thẻ `<a>` thật trỏ về domain đích.")
+
+    bl_target = st.text_input("Domain đích (đối thủ)", placeholder="vd: doithu.com",
+                              key="bl_target")
+
+    bc1, bc2 = st.columns(2)
+    bl_brands_raw = bc1.text_area(
+        "Tên thương hiệu — mỗi dòng 1 tên (tùy chọn)", height=90, key="bl_brands",
+        help="Bắt được link mà anchor là tên brand, không viết ra domain.")
+    bl_paths_raw = bc2.text_area(
+        "Trang con cần tìm deep link — mỗi dòng 1 đường dẫn (tùy chọn)", height=90,
+        key="bl_paths", placeholder="/khuyen-mai\n/dang-ky")
+
+    # ---------- Nguồn SERP (đa nguồn, chọn ngay tại chỗ) ----------
+    with st.expander("🌐 Nguồn SERP", expanded=True):
+        bl_src_kinds = st.multiselect(
+            "Chọn nguồn", ["serper", "serpapi", "dataforseo"], default=["serper"],
+            format_func=lambda k: {"serper": "Serper (Google)",
+                                   "serpapi": "SerpApi",
+                                   "dataforseo": "DataForSEO"}[k],
+            key="bl_src_kinds",
+            help="Chọn 1 nguồn để chạy rẻ. Chọn từ 2 nguồn trở lên = GỘP "
+                 "(cộng dồn + loại trùng) — chỉ nên dùng khi 1 nguồn phủ không đủ.")
+        if len(bl_src_kinds) > 1:
+            st.info("Đang bật chế độ **Gộp**: chạy song song các nguồn rồi loại trùng URL. "
+                    "Tốn credit của tất cả nguồn đã chọn.")
+
+        bl_serpapi_key, bl_serpapi_engine = "", "google"
+        bl_dfs_login = bl_dfs_pass = ""
+        bl_dfs_location = "Vietnam"
+        if "serper" in bl_src_kinds:
+            st.caption(f"Serper: dùng {len(live_keys())} key còn sống từ tab ⚙️ Cài đặt.")
+        if "serpapi" in bl_src_kinds:
+            s1, s2 = st.columns([3, 1])
+            bl_serpapi_key = s1.text_input("SerpApi API key", type="password",
+                                           key="bl_serpapi_key")
+            bl_serpapi_engine = s2.selectbox("Engine", ["google", "bing"],
+                                             key="bl_serpapi_engine",
+                                             help="Bing có index khác Google — bắt thêm link Google bỏ sót.")
+        if "dataforseo" in bl_src_kinds:
+            d1c, d2c, d3c = st.columns(3)
+            bl_dfs_login = d1c.text_input("DataForSEO login", key="bl_dfs_login")
+            bl_dfs_pass = d2c.text_input("DataForSEO password", type="password",
+                                         key="bl_dfs_pass")
+            bl_dfs_location = d3c.text_input("Location name", "Vietnam",
+                                             key="bl_dfs_location")
+
+    # ---------- Cấu hình tìm kiếm ----------
+    with st.expander("⚙️ Cấu hình tìm kiếm", expanded=True):
+        bl_fp_keys = st.multiselect(
+            "Nhóm footprint", list(backlink_finder.FOOTPRINTS),
+            default=backlink_finder.DEFAULT_FOOTPRINTS,
+            format_func=lambda k: backlink_finder.FOOTPRINTS[k][0], key="bl_fp",
+            help="Mỗi nhóm = 1 query Google. Bật càng nhiều nhóm càng phủ rộng "
+                 "nhưng tốn credit theo cấp số nhân với số quốc gia.")
+        bl_locales_raw = st.text_input(
+            "Quốc gia SERP (gl:hl, cách nhau bởi dấu phẩy)", "vn:vi", key="bl_locales",
+            help="Cùng 1 query đổi quốc gia sẽ ra tập kết quả khác nhau. "
+                 "VD: vn:vi, us:en, id:id")
+        bl_custom_raw = st.text_area(
+            "Query tự nhập — mỗi dòng 1 query, dùng {d} để thay domain (tùy chọn)",
+            height=70, key="bl_custom", placeholder='"{d}" inurl:wiki')
+
+        f1, f2, f3 = st.columns(3)
+        bl_num = f1.number_input("Kết quả mỗi query", min_value=10, max_value=100,
+                                 value=20, step=10, key="bl_num",
+                                 help="Serper free giới hạn 10/lần → tự phân trang, "
+                                      "mỗi 10 kết quả tốn 1 credit.")
+        bl_serp_workers = f2.number_input("Luồng SERP", min_value=1, max_value=32, value=4,
+                                          step=1, key="bl_serp_workers",
+                                          help="Serper free rate-limit chặt → để 2-4.")
+        bl_auto_paths = f3.number_input("Tự lấy N trang con (site:) làm footprint",
+                                        min_value=0, max_value=50, value=0, step=5,
+                                        key="bl_auto_paths",
+                                        help="0 = tắt. Tốn thêm credit nhưng bắt được deep link.")
+
+        bl_exclude_raw = st.text_input(
+            "Bỏ qua domain nguồn (cách nhau bởi dấu phẩy)", "", key="bl_exclude",
+            placeholder="google.com, facebook.com")
+        bl_cache = st.checkbox("Dùng cache (chạy lại không tốn credit)", value=True,
+                               key="bl_cache")
+        bl_no_quotes = st.checkbox(
+            "Tài khoản Serper Free — bỏ dấu ngoặc kép & intext:", value=True,
+            key="bl_no_quotes",
+            help="Serper free trả HTTP 400 'Query pattern not allowed' với query có \" \" "
+                 "hoặc intext: (các toán tử -site:/inurl:/filetype:/site: vẫn chạy). "
+                 "Bật để tự bỏ, query trùng nhau sau khi bỏ sẽ được gộp lại. "
+                 "Tài khoản trả phí thì tắt đi để khớp cụm chính xác hơn.")
+
+    # ---------- Cấu hình xác minh ----------
+    with st.expander("🔬 Cấu hình xác minh HTML", expanded=True):
+        bl_verify = st.checkbox(
+            "Xác minh từng trang ứng viên (bắt buộc để khẳng định là backlink)",
+            value=True, key="bl_verify",
+            help="Tắt = chỉ ra danh sách trang có NHẮC domain, chưa chắc có link.")
+        v1, v2, v3, v4 = st.columns(4)
+        bl_max_verify = v1.number_input("Tối đa số trang xác minh", min_value=10,
+                                        max_value=5000, value=300, step=50,
+                                        key="bl_max_verify")
+        bl_v_workers = v2.number_input("Luồng xác minh", min_value=1, max_value=64,
+                                       value=8, step=1, key="bl_v_workers")
+        bl_timeout = v3.number_input("Timeout (giây)", min_value=5, max_value=120,
+                                     value=20, step=5, key="bl_timeout")
+        bl_retries = v4.number_input("Số lần thử lại", min_value=0, max_value=5, value=1,
+                                     step=1, key="bl_retries")
+        bl_anti_bot = st.checkbox("Anti-bot (đổi User-Agent / engine khi bị chặn)",
+                                  value=True, key="bl_anti_bot")
+
+    # ---------- Ước tính + nút chạy ----------
+    _brands = [b.strip() for b in (bl_brands_raw or "").splitlines() if b.strip()]
+    _paths = [p.strip() for p in (bl_paths_raw or "").splitlines() if p.strip()]
+    _custom = [c.strip() for c in (bl_custom_raw or "").splitlines() if c.strip()]
+    _locales = backlink_finder.parse_locales(bl_locales_raw)
+    _preview = backlink_finder.build_queries(
+        bl_target, bl_fp_keys, _brands, _paths, _custom, _locales,
+        no_quotes=bl_no_quotes) if bl_target else []
+    if _preview:
+        _pages = -(-int(bl_num) // 10)      # Serper tính credit theo trang 10 kết quả
+        st.caption(f"📊 Sẽ chạy **{len(_preview)}** query × {len(_locales)} quốc gia đã tính · "
+                   f"ước tính ~**{len(_preview) * _pages}** credit Serper "
+                   f"(cache bật thì lần chạy lại gần như 0).")
+        with st.expander(f"👀 Xem trước {len(_preview)} query"):
+            st.dataframe([{"Nhóm": q.label, "Quốc gia": q.locale, "Query": q.q}
+                          for q in _preview],
+                         use_container_width=True, height=260, hide_index=True)
+
+    if st.button("🔍 Tìm backlink", type="primary", key="bl_run",
+                 use_container_width=True):
+        if not bl_target.strip():
+            st.warning("Chưa nhập domain đích.")
+        elif not bl_src_kinds:
+            st.warning("Chưa chọn nguồn SERP nào.")
+        elif not _preview:
+            st.warning("Chưa chọn nhóm footprint nào (hoặc domain không hợp lệ).")
+        else:
+            cache = FileCache(settings.cache_dir, enabled=bl_cache)
+            gl0, hl0 = _locales[0]
+            try:
+                sources = [backlink_finder.build_source(
+                    k, serper_keys=live_keys(), serpapi_key=bl_serpapi_key,
+                    dfs_login=bl_dfs_login, dfs_password=bl_dfs_pass,
+                    dfs_location=bl_dfs_location, gl=gl0, hl=hl0,
+                    timeout=int(bl_timeout), cache=cache,
+                    serpapi_engine=bl_serpapi_engine) for k in bl_src_kinds]
+                source = (sources[0] if len(sources) == 1
+                          else backlink_finder.AggregateSource(sources))
+            except Exception as e:
+                source = None
+                st.error(f"Không tạo được nguồn SERP: {e}")
+
+            if source is not None:
+                bar = st.progress(0.0, text="Bắt đầu...")
+                log = st.empty()
+
+                def bl_progress(msg, frac=None):
+                    if frac is not None:
+                        bar.progress(min(max(frac, 0.0), 1.0), text=msg)
+                    log.info(msg)
+
+                try:
+                    queries = _preview
+                    if int(bl_auto_paths) > 0:
+                        bl_progress("Đang lấy trang con đang index (site:)...", 0.02)
+                        auto = backlink_finder.discover_paths(source, bl_target,
+                                                              int(bl_auto_paths))
+                        if auto:
+                            queries = backlink_finder.build_queries(
+                                bl_target, bl_fp_keys, _brands,
+                                list(dict.fromkeys(_paths + auto)), _custom, _locales,
+                                no_quotes=bl_no_quotes)
+                            bl_progress(f"Thêm {len(auto)} trang con làm footprint.", 0.05)
+
+                    cands, serp_errs = backlink_finder.collect_candidates(
+                        source, queries, bl_target, num=int(bl_num),
+                        workers=int(bl_serp_workers),
+                        exclude_domains=[d for d in re.split(r"[,\s]+", bl_exclude_raw or "") if d],
+                        progress=bl_progress)
+
+                    dropped = 0
+                    if len(cands) > int(bl_max_verify):
+                        dropped = len(cands) - int(bl_max_verify)
+                        cands = cands[:int(bl_max_verify)]
+
+                    if bl_verify:
+                        results = backlink_finder.verify_candidates(
+                            cands, bl_target, timeout=int(bl_timeout),
+                            anti_bot=bl_anti_bot, workers=int(bl_v_workers),
+                            retries=int(bl_retries), progress=bl_progress)
+                    else:
+                        results = [backlink_finder.VerifyResult(
+                            candidate=c, status="chưa xác minh") for c in cands]
+
+                    st.session_state["bl_results"] = results
+                    st.session_state["bl_stats"] = backlink_finder.summarize(
+                        results, queries_run=len(queries),
+                        credits_used=source.credits())
+                    st.session_state["bl_target_done"] = backlink_finder.norm_domain(bl_target)
+                    st.session_state["bl_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    st.session_state["bl_errors"] = serp_errs
+                    st.session_state["bl_dropped"] = dropped
+                    st.session_state["bl_verified"] = bl_verify
+
+                    for s in (source.sources if isinstance(source, backlink_finder.AggregateSource)
+                              else [source]):
+                        if isinstance(s, backlink_finder.SerperSource):
+                            sync_dead_from_provider(s)
+                    bar.progress(1.0, text="Hoàn tất.")
+                    st.success("Hoàn tất!")
+                except Exception as e:
+                    st.exception(e)
+
+    # ---------- Kết quả ----------
+    if "bl_results" in st.session_state:
+        results = st.session_state["bl_results"]
+        stats = st.session_state["bl_stats"]
+        link_rows = backlink_finder.backlink_rows(results)
+        cand_rows = backlink_finder.candidate_rows(results)
+        dom_rows = backlink_finder.domain_rows(results)
+
+        st.divider()
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Ứng viên SERP", stats["candidates"])
+        m2.metric("✅ Trang có link", stats["pages_with_link"])
+        m3.metric("🔗 Backlink", stats["backlinks"])
+        m4.metric("🌐 Referring domain", stats["ref_domains"])
+        m5.metric("Dofollow", stats["dofollow"])
+
+        info = [f"🕒 {st.session_state.get('bl_at', '')}",
+                f"credit SERP đã dùng: {stats['credits']}"]
+        if stats["text_only"]:
+            info.append(f"⚠️ {stats['text_only']} trang chỉ nhắc dạng text/JS (không tính backlink)")
+        if stats["dead"]:
+            info.append(f"💀 {stats['dead']} trang chết/lỗi")
+        st.caption(" · ".join(info))
+
+        if st.session_state.get("bl_dropped"):
+            st.warning(f"Đã cắt {st.session_state['bl_dropped']} ứng viên vượt giới hạn "
+                       f"'Tối đa số trang xác minh' — tăng giới hạn để quét hết.")
+        if not st.session_state.get("bl_verified", True):
+            st.warning("Chưa bật xác minh HTML — danh sách dưới đây mới là trang có NHẮC "
+                       "domain, chưa chắc có link thật.")
+        if st.session_state.get("bl_errors"):
+            with st.expander(f"⚠️ {len(st.session_state['bl_errors'])} query lỗi"):
+                st.write(st.session_state["bl_errors"])
+
+        b1, b2 = st.columns(2)
+        b1.download_button("⬇️ CSV backlink", exporters.to_csv_bytes(link_rows),
+                           "backlinks.csv", "text/csv",
+                           disabled=not link_rows, use_container_width=True)
+        b2.download_button(
+            "⬇️ Excel báo cáo",
+            exporters.backlink_to_excel_bytes(
+                link_rows, cand_rows, dom_rows, stats,
+                st.session_state.get("bl_target_done", ""),
+                st.session_state.get("bl_at", "")),
+            "backlink_report.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+
+        r_link, r_dom, r_cand = st.tabs(
+            [f"🔗 Backlink ({len(link_rows)})",
+             f"🌐 Domain nguồn ({len(dom_rows)})",
+             f"📄 Ứng viên SERP ({len(cand_rows)})"])
+        with r_link:
+            if link_rows:
+                st.dataframe(link_rows, use_container_width=True, height=520,
+                             hide_index=True)
+            else:
+                st.info("Chưa tìm thấy link thật nào. Thử bật thêm nhóm footprint, "
+                        "thêm quốc gia SERP, hoặc thêm tên brand.")
+        with r_dom:
+            st.dataframe(dom_rows, use_container_width=True, height=520, hide_index=True)
+        with r_cand:
+            st.caption("Mọi URL SERP trả về + kết quả xác minh — kể cả trang không có link.")
+            st.dataframe(cand_rows, use_container_width=True, height=520, hide_index=True)
 
 # ==================================================================
 # TAB: CÀI ĐẶT (quản lý Serper key + Service Account)

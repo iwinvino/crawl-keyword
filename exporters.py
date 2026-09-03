@@ -165,6 +165,48 @@ def url_to_excel_bytes(rows, checked_at: str = "", group_rows=None,
     return buf.getvalue()
 
 
+def backlink_to_excel_bytes(link_rows, cand_rows=None, dom_rows=None,
+                            stats=None, target: str = "", checked_at: str = "") -> bytes:
+    """Báo cáo Excel cho chế độ Tìm Backlink (SERP mining + xác minh HTML).
+
+    Sheets: Tổng quan / Backlink / Theo domain nguồn / Ứng viên SERP / Không có link.
+    """
+    s = stats or {}
+    summary = pd.DataFrame([
+        {"Chỉ số": "Domain đích", "Giá trị": target or "-"},
+        {"Chỉ số": "Thời điểm quét", "Giá trị": checked_at or "-"},
+        {"Chỉ số": "Số query SERP đã chạy", "Giá trị": s.get("queries", 0)},
+        {"Chỉ số": "Ứng viên SERP", "Giá trị": s.get("candidates", 0)},
+        {"Chỉ số": "Trang có link thật ✅", "Giá trị": s.get("pages_with_link", 0)},
+        {"Chỉ số": "Tổng backlink", "Giá trị": s.get("backlinks", 0)},
+        {"Chỉ số": "Referring domain", "Giá trị": s.get("ref_domains", 0)},
+        {"Chỉ số": "Dofollow", "Giá trị": s.get("dofollow", 0)},
+        {"Chỉ số": "Nofollow", "Giá trị": s.get("nofollow", 0)},
+        {"Chỉ số": "Chỉ text/JS (không tính) ⚠️", "Giá trị": s.get("text_only", 0)},
+        {"Chỉ số": "Trang chết/lỗi 💀", "Giá trị": s.get("dead", 0)},
+        {"Chỉ số": "Credit SERP đã dùng", "Giá trị": s.get("credits", 0)},
+    ])
+
+    ldf = pd.DataFrame(link_rows or [])
+    cdf = pd.DataFrame(cand_rows or [])
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        summary.to_excel(writer, sheet_name="Tổng quan", index=False)
+        if not ldf.empty:
+            ldf.to_excel(writer, sheet_name="Backlink", index=False)
+        if dom_rows:
+            pd.DataFrame(dom_rows).to_excel(writer, sheet_name="Theo domain nguồn",
+                                            index=False)
+        if not cdf.empty:
+            cdf.to_excel(writer, sheet_name="Ứng viên SERP", index=False)
+            miss = cdf[cdf["Kết quả"].astype(str).str.startswith("❌")]
+            if not miss.empty:
+                miss.to_excel(writer, sheet_name="Không có link", index=False)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def to_excel_bytes(rows, image_hits=None, title_rows=None) -> bytes:
     df = pd.DataFrame(rows)
     buf = io.BytesIO()
